@@ -52,7 +52,7 @@ Each step must end with a complete, functioning application state that can run e
 - End-to-end run hydrates Instagram fields when a match is found.
 - No-match rows stay valid with blank Instagram fields.
 
-## Step 5: Compose hydration pipeline (Next)
+## Step 5: Compose hydration pipeline (Completed)
 - Combine validation + YouTube + Instagram adapters in one deterministic pipeline.
 - Preserve all original columns exactly; append hydrated columns in PRD order.
 - Ensure duplicate input columns (e.g., repeated `Email`) are handled consistently.
@@ -76,7 +76,7 @@ Each step must end with a complete, functioning application state that can run e
 - `yt-dlp`: robust extractor; can be used for metadata via URL-based lookups; heavier dependency. citeturn1search1
 - `py-yt-search`: async YouTube search library with channels/videos/playlists. citeturn3search1turn4search0
 
-## Step 6: Hardening for personal-use reliability
+## Step 6: Hardening for personal-use reliability (Completed)
 - Add retry/backoff and request throttling controls for external lookups.
 - Add optional row limit for batch processing.
 - Ensure graceful degradation when third-party lookups fail.
@@ -85,7 +85,7 @@ Each step must end with a complete, functioning application state that can run e
 - Tool completes successfully under partial external failures.
 - Failures are reported without corrupting output.
 
-## Step 7: Finalize docs and runbook
+## Step 7: Finalize docs and runbook (Completed)
 - Write usage docs with required inputs, options, and example command.
 - Document known limits and best-effort nature of social metrics.
 - Add troubleshooting notes for common `scrapetube`/`instaloader` issues.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
@@ -27,6 +28,8 @@ class InstagramProfileData(BaseModel):
 class InstagramSearchConfig:
     candidate_limit: int = 5
     posts_limit: int = 12
+    retry_attempts: int = 2
+    retry_backoff: float = 1.0
 
 
 def _sanitize_handle(value: str) -> str | None:
@@ -125,12 +128,23 @@ def find_instagram_profile(
     loader = loader or instaloader.Instaloader()
 
     for handle in _candidate_handles(query)[: config.candidate_limit]:
-        try:
-            profile = instaloader.Profile.from_username(loader.context, handle)
-        except instaloader.exceptions.ProfileNotExistsException:
-            continue
-        except instaloader.exceptions.ConnectionException:
-            LOGGER.warning("Instagram lookup failed for handle %s.", handle)
+        profile = None
+        for attempt in range(config.retry_attempts):
+            try:
+                profile = instaloader.Profile.from_username(loader.context, handle)
+                break
+            except instaloader.exceptions.ProfileNotExistsException:
+                profile = None
+                break
+            except instaloader.exceptions.ConnectionException:
+                LOGGER.warning(
+                    "Instagram lookup failed for handle %s (attempt %s/%s).",
+                    handle,
+                    attempt + 1,
+                    config.retry_attempts,
+                )
+                time.sleep(config.retry_backoff * (attempt + 1))
+        if profile is None:
             continue
 
         LOGGER.info("Instagram source profile: %s", _build_profile_url(handle))

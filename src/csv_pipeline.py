@@ -45,6 +45,9 @@ class ValidationReport(BaseModel):
     total_rows: int = 0
     valid_rows: int = 0
     invalid_rows: int = 0
+    hydrated_youtube_rows: int = 0
+    hydrated_instagram_rows: int = 0
+    warning_rows: int = 0
     issues: list[RowValidationIssue] = Field(default_factory=list)
 
 
@@ -175,6 +178,7 @@ def copy_csv_rows(
     strict: bool = False,
     youtube_lookup: Callable[[list[str]], YouTubeChannelData | None] | None = None,
     instagram_lookup: Callable[[str], InstagramProfileData | None] | None = None,
+    row_limit: int | None = None,
 ) -> ValidationReport:
     report = ValidationReport()
     with input_path.open("r", encoding="utf-8", newline="") as input_file:
@@ -193,6 +197,8 @@ def copy_csv_rows(
             writer.writerow(output_headers)
 
             for line_number, row in enumerate(reader, start=2):
+                if row_limit is not None and report.total_rows >= row_limit:
+                    break
                 report.total_rows += 1
                 if len(row) != len(headers):
                     message = (
@@ -241,6 +247,7 @@ def copy_csv_rows(
                                 result.publishing_cadence or "",
                                 result.channel_age or "",
                             ]
+                            report.hydrated_youtube_rows += 1
                             source = result.source_url or resolved_url
                             if source:
                                 LOGGER.info("YouTube source URL: %s", source)
@@ -253,18 +260,21 @@ def copy_csv_rows(
                                     "",
                                     "",
                                 ]
+                                report.hydrated_youtube_rows += 1
                                 LOGGER.info(
                                     "YouTube hint used for row %s (queries=%s).",
                                     line_number,
                                     queries,
                                 )
                             else:
+                                report.warning_rows += 1
                                 LOGGER.warning(
                                     "No YouTube match for row %s (queries=%s).",
                                     line_number,
                                     queries,
                                 )
                     else:
+                        report.warning_rows += 1
                         LOGGER.warning("No YouTube query data for row %s.", line_number)
 
                 instagram_values = ["", "", "", ""]
@@ -281,23 +291,29 @@ def copy_csv_rows(
                                 result.publishing_cadence or "",
                                 result.account_age or "",
                             ]
+                            report.hydrated_instagram_rows += 1
                             if result.source_url:
                                 LOGGER.info("Instagram source URL: %s", result.source_url)
                         else:
+                            report.warning_rows += 1
                             LOGGER.warning(
                                 "No Instagram match for row %s (query=%s).",
                                 line_number,
                                 query,
                             )
                     else:
+                        report.warning_rows += 1
                         LOGGER.warning("No Instagram query data for row %s.", line_number)
 
                 writer.writerow(row + youtube_values + instagram_values)
 
     LOGGER.info(
-        "Validation summary: total=%s valid=%s invalid=%s",
+        "Validation summary: total=%s valid=%s invalid=%s youtube=%s instagram=%s warnings=%s",
         report.total_rows,
         report.valid_rows,
         report.invalid_rows,
+        report.hydrated_youtube_rows,
+        report.hydrated_instagram_rows,
+        report.warning_rows,
     )
     return report

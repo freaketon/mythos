@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import time
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -56,6 +57,8 @@ class YouTubeSearchConfig:
     yt_search_limit: int = 5
     language: str = "en"
     region: str = "US"
+    retry_attempts: int = 2
+    retry_backoff: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -244,11 +247,15 @@ def _search_scrapetube(
 ) -> list[YouTubeCandidate]:
     candidates: list[YouTubeCandidate] = []
     for query in queries:
-        results = scrapetube.get_search(
-            query,
-            results_type="channel",
-            limit=config.search_limit,
-            sleep=config.request_sleep,
+        results = _with_retry(
+            lambda: scrapetube.get_search(
+                query,
+                results_type="channel",
+                limit=config.search_limit,
+                sleep=config.request_sleep,
+            ),
+            attempts=config.retry_attempts,
+            backoff=config.retry_backoff,
         )
         for raw in results:
             if not isinstance(raw, dict):
@@ -272,7 +279,11 @@ def _search_yt_search_python(
             language=config.language,
             region=config.region,
         )
-        results = search.result().get("result", [])
+        results = _with_retry(
+            lambda: search.result().get("result", []),
+            attempts=config.retry_attempts,
+            backoff=config.retry_backoff,
+        )
         for raw in results:
             if isinstance(raw, dict):
                 candidate = _build_candidate_from_yt_search(raw)
@@ -305,11 +316,15 @@ def find_best_youtube_channel(
 
     LOGGER.info("YouTube source channel: %s", best.url)
 
-    videos = scrapetube.get_channel(
-        channel_id=best.channel_id,
-        channel_url=best.url if best.channel_id is None else None,
-        limit=config.videos_limit,
-        sleep=config.request_sleep,
+    videos = _with_retry(
+        lambda: scrapetube.get_channel(
+            channel_id=best.channel_id,
+            channel_url=best.url if best.channel_id is None else None,
+            limit=config.videos_limit,
+            sleep=config.request_sleep,
+        ),
+        attempts=config.retry_attempts,
+        backoff=config.retry_backoff,
     )
     video_results = _coerce_video_results(videos)
     days_list = [
@@ -319,12 +334,16 @@ def find_best_youtube_channel(
     ]
     publishing_cadence = _cadence_from_days(days_list)
 
-    oldest_video = scrapetube.get_channel(
-        channel_id=best.channel_id,
-        channel_url=best.url if best.channel_id is None else None,
-        limit=1,
-        sort_by="oldest",
-        sleep=config.request_sleep,
+    oldest_video = _with_retry(
+        lambda: scrapetube.get_channel(
+            channel_id=best.channel_id,
+            channel_url=best.url if best.channel_id is None else None,
+            limit=1,
+            sort_by="oldest",
+            sleep=config.request_sleep,
+        ),
+        attempts=config.retry_attempts,
+        backoff=config.retry_backoff,
     )
     oldest_results = _coerce_video_results(oldest_video)
     oldest_days = None
@@ -350,3 +369,15 @@ def find_youtube_channel(
     config: YouTubeSearchConfig | None = None,
 ) -> YouTubeChannelData | None:
     return find_best_youtube_channel([query], config=config)
+def _with_retry(func, *, attempts: int, backoff: float):
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return func()
+        except Exception as exc:  # pragma: no cover - defensive
+            last_error = exc
+            LOGGER.warning("YouTube lookup failed (attempt %s/%s).", attempt + 1, attempts)
+            time.sleep(backoff * (attempt + 1))
+    if last_error:
+        raise last_error
+    return None
