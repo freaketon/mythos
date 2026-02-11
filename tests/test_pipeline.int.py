@@ -54,6 +54,7 @@ def test_pipeline_mixed_rows_summary(tmp_path: Path) -> None:
     assert report.hydrated_youtube_rows == 1
     assert report.hydrated_instagram_rows == 1
     assert report.warning_rows == 2
+    assert report.low_confidence_rows == []
 
     output_text = output_csv.read_text(encoding="utf-8")
     assert "MrBeast" in output_text

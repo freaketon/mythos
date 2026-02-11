@@ -137,6 +137,7 @@ def test_copy_csv_rows_resolves_handle_without_hint(tmp_path: Path) -> None:
             publishing_cadence="Weekly or more",
             channel_age="10 years",
             source_url="https://www.youtube.com/@MrBeast",
+            accepted=True,
         )
 
     report = copy_csv_rows(input_csv, output_csv, youtube_lookup=fake_lookup)

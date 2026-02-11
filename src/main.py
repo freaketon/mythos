@@ -34,6 +34,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Limit number of rows processed (data rows only).",
     )
+    parser.add_argument(
+        "--low-confidence-report",
+        type=Path,
+        default=None,
+        help="Write a CSV report of low-confidence YouTube matches.",
+    )
     return parser
 
 
@@ -50,6 +56,7 @@ def run(argv: list[str] | None = None) -> int:
         youtube_lookup=youtube_lookup,
         instagram_lookup=instagram_lookup,
         row_limit=args.limit,
+        low_confidence_report_path=args.low_confidence_report,
     )
     return 0
 

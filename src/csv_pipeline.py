@@ -41,6 +41,15 @@ class RowValidationIssue(BaseModel):
     message: str
 
 
+class LowConfidenceIssue(BaseModel):
+    row_number: int
+    queries: list[str]
+    candidate_url: str | None
+    candidate_handle: str | None
+    confidence: int | None
+    source: str | None
+
+
 class ValidationReport(BaseModel):
     total_rows: int = 0
     valid_rows: int = 0
@@ -48,6 +57,7 @@ class ValidationReport(BaseModel):
     hydrated_youtube_rows: int = 0
     hydrated_instagram_rows: int = 0
     warning_rows: int = 0
+    low_confidence_rows: list[LowConfidenceIssue] = Field(default_factory=list)
     issues: list[RowValidationIssue] = Field(default_factory=list)
 
 
@@ -179,6 +189,7 @@ def copy_csv_rows(
     youtube_lookup: Callable[[list[str]], YouTubeChannelData | None] | None = None,
     instagram_lookup: Callable[[str], InstagramProfileData | None] | None = None,
     row_limit: int | None = None,
+    low_confidence_report_path: Path | None = None,
 ) -> ValidationReport:
     report = ValidationReport()
     with input_path.open("r", encoding="utf-8", newline="") as input_file:
@@ -235,7 +246,7 @@ def copy_csv_rows(
                     queries = _build_youtube_queries(headers, row)
                     if queries:
                         result = youtube_lookup(queries)
-                        if result:
+                        if result and result.accepted:
                             resolved_handle = result.handle or hint_handle
                             resolved_url = result.url or hint_url
                             youtube_values = [
@@ -251,6 +262,17 @@ def copy_csv_rows(
                             source = result.source_url or resolved_url
                             if source:
                                 LOGGER.info("YouTube source URL: %s", source)
+                        elif result and not result.accepted:
+                            report.low_confidence_rows.append(
+                                LowConfidenceIssue(
+                                    row_number=line_number,
+                                    queries=queries,
+                                    candidate_url=result.url,
+                                    candidate_handle=result.handle,
+                                    confidence=result.confidence,
+                                    source=result.source,
+                                )
+                            )
                         else:
                             if hint_handle or hint_url:
                                 youtube_values = [
@@ -316,4 +338,30 @@ def copy_csv_rows(
         report.hydrated_instagram_rows,
         report.warning_rows,
     )
+
+    if low_confidence_report_path and report.low_confidence_rows:
+        with low_confidence_report_path.open("w", encoding="utf-8", newline="") as report_file:
+            writer = csv.writer(report_file)
+            writer.writerow(
+                [
+                    "row_number",
+                    "queries",
+                    "candidate_url",
+                    "candidate_handle",
+                    "confidence",
+                    "source",
+                ]
+            )
+            for issue in report.low_confidence_rows:
+                writer.writerow(
+                    [
+                        issue.row_number,
+                        " | ".join(issue.queries),
+                        issue.candidate_url or "",
+                        issue.candidate_handle or "",
+                        issue.confidence if issue.confidence is not None else "",
+                        issue.source or "",
+                    ]
+                )
+
     return report

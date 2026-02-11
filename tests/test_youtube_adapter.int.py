@@ -84,3 +84,4 @@ def test_find_best_youtube_channel_falls_back_to_yt_search(monkeypatch) -> None:
     assert result is not None
     assert result.handle == "@MockClient"
     assert result.url == "https://www.youtube.com/channel/UC999"
+    assert result.accepted is True
