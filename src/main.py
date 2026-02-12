@@ -40,11 +40,25 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write a CSV report of low-confidence YouTube matches.",
     )
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=100,
+        help="Flush output files every N processed rows to reduce progress loss on crash.",
+    )
+    parser.add_argument(
+        "--events-file",
+        type=Path,
+        default=Path("run.events.jsonl"),
+        help="Write row-level hit/no-hit events as JSONL for UI streaming.",
+    )
     return parser
 
 
 def run(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     parser = build_parser()
     args = parser.parse_args(argv)
     youtube_lookup = find_best_youtube_channel if args.youtube else None
@@ -57,6 +71,8 @@ def run(argv: list[str] | None = None) -> int:
         instagram_lookup=instagram_lookup,
         row_limit=args.limit,
         low_confidence_report_path=args.low_confidence_report,
+        checkpoint_every=args.checkpoint_every,
+        events_path=args.events_file,
     )
     return 0
 

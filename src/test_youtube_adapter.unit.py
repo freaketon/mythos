@@ -12,6 +12,7 @@ def test_parse_subscriber_count() -> None:
     assert _parse_subscriber_count("1.2K subscribers") == 1200
     assert _parse_subscriber_count("12,345 subscribers") == 12345
     assert _parse_subscriber_count("3M subscribers") == 3_000_000
+    assert _parse_subscriber_count({"simpleText": "4.5K subscribers"}) == 4500
     assert _parse_subscriber_count(None) is None
 
 
@@ -20,6 +21,7 @@ def test_relative_time_to_days() -> None:
     assert _relative_time_to_days("3 weeks ago") == 21
     assert _relative_time_to_days("4 months ago") == 120
     assert _relative_time_to_days("1 year ago") == 365
+    assert _relative_time_to_days({"simpleText": "11 days ago"}) == 11
     assert _relative_time_to_days("Streamed 2 days ago") == 2
     assert _relative_time_to_days(None) is None
 

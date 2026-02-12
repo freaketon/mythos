@@ -7,12 +7,13 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Iterable
+from urllib.parse import parse_qs, unquote, urlparse
 
 from youtubesearchpython import ChannelsSearch
 
 import httpx
 import scrapetube
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -24,6 +25,9 @@ _SUBSCRIBER_PATTERN = re.compile(
     r"(?P<count>[\d,.]+)\s*(?P<unit>[KMB])?",
     re.IGNORECASE,
 )
+_CHANNEL_URL_ID_PATTERN = re.compile(r"/channel/([A-Za-z0-9_-]+)")
+_HTML_HREF_PATTERN = re.compile(r'href="([^"]+)"')
+_DOMAIN_PATTERN = re.compile(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", re.IGNORECASE)
 
 
 class ScrapetubeSearchResult(BaseModel):
@@ -32,13 +36,13 @@ class ScrapetubeSearchResult(BaseModel):
     channelId: str | None = None
     channelTitle: str | None = None
     channelHandle: str | None = None
-    subscriberCountText: str | None = None
+    subscriberCountText: str | dict[str, object] | None = None
 
 
 class ScrapetubeVideoResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    publishedTimeText: str | None = None
+    publishedTimeText: str | dict[str, object] | None = None
 
 
 class YouTubeChannelData(BaseModel):
@@ -68,6 +72,8 @@ class YouTubeSearchConfig:
     youtube_api_max_results: int = 5
     websearch_api_key: str | None = None
     websearch_endpoint: str = "https://google.serper.dev/search"
+    web_validation: bool = True
+    web_validation_queries: int = 3
 
 
 @dataclass(frozen=True)
@@ -96,10 +102,34 @@ def _build_channel_url(channel_id: str | None, handle: str | None) -> str | None
     return None
 
 
-def _parse_subscriber_count(text: str | None) -> int | None:
-    if not text:
+def _extract_text(value: str | dict[str, object] | None) -> str | None:
+    if value is None:
         return None
-    match = _SUBSCRIBER_PATTERN.search(text.replace("subscribers", ""))
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, dict):
+        return None
+    simple_text = value.get("simpleText")
+    if isinstance(simple_text, str):
+        return simple_text
+    runs = value.get("runs")
+    if isinstance(runs, list):
+        parts: list[str] = []
+        for run in runs:
+            if isinstance(run, dict):
+                text = run.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        if parts:
+            return "".join(parts)
+    return None
+
+
+def _parse_subscriber_count(text: str | dict[str, object] | None) -> int | None:
+    normalized_text = _extract_text(text)
+    if not normalized_text:
+        return None
+    match = _SUBSCRIBER_PATTERN.search(normalized_text.replace("subscribers", ""))
     if not match:
         return None
     value = match.group("count").replace(",", "")
@@ -112,10 +142,11 @@ def _parse_subscriber_count(text: str | None) -> int | None:
     return int(numeric * multiplier)
 
 
-def _relative_time_to_days(text: str | None) -> int | None:
-    if not text:
+def _relative_time_to_days(text: str | dict[str, object] | None) -> int | None:
+    normalized_text = _extract_text(text)
+    if not normalized_text:
         return None
-    match = _RELATIVE_TIME_PATTERN.search(text)
+    match = _RELATIVE_TIME_PATTERN.search(normalized_text)
     if not match:
         return None
     value = int(match.group("value"))
@@ -168,7 +199,10 @@ def _coerce_video_results(raw_results: Iterable[object]) -> list[ScrapetubeVideo
     parsed: list[ScrapetubeVideoResult] = []
     for raw in raw_results:
         if isinstance(raw, dict):
-            parsed.append(ScrapetubeVideoResult.model_validate(raw))
+            try:
+                parsed.append(ScrapetubeVideoResult.model_validate(raw))
+            except ValidationError:
+                LOGGER.warning("Skipping malformed scrapetube video result.")
     return parsed
 
 
@@ -255,20 +289,30 @@ def _search_scrapetube(
 ) -> list[YouTubeCandidate]:
     candidates: list[YouTubeCandidate] = []
     for query in queries:
-        results = _with_retry(
-            lambda: scrapetube.get_search(
-                query,
-                results_type="channel",
-                limit=config.search_limit,
-                sleep=config.request_sleep,
-            ),
-            attempts=config.retry_attempts,
-            backoff=config.retry_backoff,
-        )
+        try:
+            results = _with_retry(
+                lambda: list(
+                    scrapetube.get_search(
+                        query,
+                        results_type="channel",
+                        limit=config.search_limit,
+                        sleep=config.request_sleep,
+                    )
+                ),
+                attempts=config.retry_attempts,
+                backoff=config.retry_backoff,
+            )
+        except Exception:
+            LOGGER.warning("Scrapetube search failed for query: %s", query)
+            continue
         for raw in results:
             if not isinstance(raw, dict):
                 continue
-            parsed = ScrapetubeSearchResult.model_validate(raw)
+            try:
+                parsed = ScrapetubeSearchResult.model_validate(raw)
+            except ValidationError:
+                LOGGER.warning("Skipping malformed scrapetube result for query: %s", query)
+                continue
             candidate = _build_candidate_from_scrapetube(parsed)
             if candidate:
                 candidates.append(candidate)
@@ -281,17 +325,21 @@ def _search_yt_search_python(
 ) -> list[YouTubeCandidate]:
     candidates: list[YouTubeCandidate] = []
     for query in queries:
-        search = ChannelsSearch(
-            query,
-            limit=config.yt_search_limit,
-            language=config.language,
-            region=config.region,
-        )
-        results = _with_retry(
-            lambda: search.result().get("result", []),
-            attempts=config.retry_attempts,
-            backoff=config.retry_backoff,
-        )
+        try:
+            search = ChannelsSearch(
+                query,
+                limit=config.yt_search_limit,
+                language=config.language,
+                region=config.region,
+            )
+            results = _with_retry(
+                lambda: search.result().get("result", []),
+                attempts=config.retry_attempts,
+                backoff=config.retry_backoff,
+            )
+        except Exception:
+            LOGGER.warning("yt-search-python lookup failed for query: %s", query)
+            continue
         for raw in results:
             if isinstance(raw, dict):
                 candidate = _build_candidate_from_yt_search(raw)
@@ -310,21 +358,25 @@ def _search_youtube_api(
     candidates: list[YouTubeCandidate] = []
     client = httpx.Client(timeout=10)
     for query in queries:
-        response = _with_retry(
-            lambda: client.get(
-                "https://www.googleapis.com/youtube/v3/search",
-                params={
-                    "part": "snippet",
-                    "q": query,
-                    "type": "channel",
-                    "maxResults": config.youtube_api_max_results,
-                    "key": api_key,
-                },
-            ),
-            attempts=config.retry_attempts,
-            backoff=config.retry_backoff,
-        )
-        data = response.json()
+        try:
+            response = _with_retry(
+                lambda: client.get(
+                    "https://www.googleapis.com/youtube/v3/search",
+                    params={
+                        "part": "snippet",
+                        "q": query,
+                        "type": "channel",
+                        "maxResults": config.youtube_api_max_results,
+                        "key": api_key,
+                    },
+                ),
+                attempts=config.retry_attempts,
+                backoff=config.retry_backoff,
+            )
+            data = response.json()
+        except Exception:
+            LOGGER.warning("YouTube API search failed for query: %s", query)
+            continue
         items = data.get("items", [])
         channel_ids = [
             item.get("id", {}).get("channelId")
@@ -334,19 +386,23 @@ def _search_youtube_api(
         channel_ids = [cid for cid in channel_ids if cid]
         if not channel_ids:
             continue
-        details = _with_retry(
-            lambda: client.get(
-                "https://www.googleapis.com/youtube/v3/channels",
-                params={
-                    "part": "snippet,statistics",
-                    "id": ",".join(channel_ids),
-                    "key": api_key,
-                },
-            ),
-            attempts=config.retry_attempts,
-            backoff=config.retry_backoff,
-        )
-        detail_items = details.json().get("items", [])
+        try:
+            details = _with_retry(
+                lambda: client.get(
+                    "https://www.googleapis.com/youtube/v3/channels",
+                    params={
+                        "part": "snippet,statistics",
+                        "id": ",".join(channel_ids),
+                        "key": api_key,
+                    },
+                ),
+                attempts=config.retry_attempts,
+                backoff=config.retry_backoff,
+            )
+            detail_items = details.json().get("items", [])
+        except Exception:
+            LOGGER.warning("YouTube API channel details failed for query: %s", query)
+            continue
         for item in detail_items:
             if not isinstance(item, dict):
                 continue
@@ -388,16 +444,20 @@ def _search_websearch_serper(
     candidates: list[YouTubeCandidate] = []
     client = httpx.Client(timeout=10)
     for query in queries:
-        response = _with_retry(
-            lambda: client.post(
-                config.websearch_endpoint,
-                headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-                json={"q": query},
-            ),
-            attempts=config.retry_attempts,
-            backoff=config.retry_backoff,
-        )
-        data = response.json()
+        try:
+            response = _with_retry(
+                lambda: client.post(
+                    config.websearch_endpoint,
+                    headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+                    json={"q": query},
+                ),
+                attempts=config.retry_attempts,
+                backoff=config.retry_backoff,
+            )
+            data = response.json()
+        except Exception:
+            LOGGER.warning("Websearch fallback failed for query: %s", query)
+            continue
         organic = data.get("organic", [])
         for item in organic:
             if not isinstance(item, dict):
@@ -421,6 +481,227 @@ def _search_websearch_serper(
                 )
             )
     return candidates
+
+
+def _extract_redirect_url(href: str) -> str:
+    if href.startswith("//"):
+        href = f"https:{href}"
+    parsed = urlparse(href)
+    if "duckduckgo.com" in (parsed.netloc or "") and parsed.path.startswith("/l/"):
+        query_params = parse_qs(parsed.query)
+        uddg = query_params.get("uddg")
+        if uddg:
+            return unquote(uddg[0])
+    return href
+
+
+def _search_websearch_duckduckgo(
+    queries: list[str],
+    config: YouTubeSearchConfig,
+) -> list[YouTubeCandidate]:
+    candidates: list[YouTubeCandidate] = []
+    client = httpx.Client(timeout=10)
+    for query in queries:
+        try:
+            response = _with_retry(
+                lambda: client.get(
+                    "https://duckduckgo.com/html/",
+                    params={"q": query},
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    follow_redirects=True,
+                ),
+                attempts=config.retry_attempts,
+                backoff=config.retry_backoff,
+            )
+            html = response.text
+        except Exception:
+            LOGGER.warning("DuckDuckGo fallback failed for query: %s", query)
+            continue
+
+        for match in _HTML_HREF_PATTERN.finditer(html):
+            raw_href = match.group(1)
+            link = _extract_redirect_url(raw_href)
+            if "youtube.com" not in link and "youtu.be" not in link:
+                continue
+            handle = None
+            channel_id = None
+            if "/@" in link:
+                handle = _normalize_handle(link.split("/@")[-1].split("/")[0])
+            channel_match = _CHANNEL_URL_ID_PATTERN.search(link)
+            if channel_match:
+                channel_id = channel_match.group(1)
+            candidates.append(
+                YouTubeCandidate(
+                    title=None,
+                    handle=handle,
+                    url=link,
+                    subscriber_count=None,
+                    channel_id=channel_id,
+                    source="websearch-ddg",
+                )
+            )
+    return candidates
+
+
+def _search_websearch(
+    queries: list[str],
+    config: YouTubeSearchConfig,
+) -> list[YouTubeCandidate]:
+    candidates = _search_websearch_serper(queries, config)
+    if candidates:
+        return candidates
+    return _search_websearch_duckduckgo(queries, config)
+
+
+def _extract_domains(queries: list[str]) -> list[str]:
+    found: list[str] = []
+    for query in queries:
+        for match in _DOMAIN_PATTERN.finditer(query):
+            domain = match.group(0).lower().strip().strip(".")
+            if domain not in found:
+                found.append(domain)
+    return found
+
+
+def _search_domain_first_hit(
+    queries: list[str],
+    config: YouTubeSearchConfig,
+) -> YouTubeCandidate | None:
+    domains = _extract_domains(queries)
+    for domain in domains:
+        domain_query = f"{domain} youtube"
+        candidates = _search_websearch([domain_query], config)
+        if candidates:
+            first = candidates[0]
+            return YouTubeCandidate(
+                title=first.title,
+                handle=first.handle,
+                url=first.url,
+                subscriber_count=first.subscriber_count,
+                channel_id=first.channel_id,
+                source="websearch-domain-first",
+            )
+    return None
+
+
+def _normalize_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    normalized = url.strip().lower().split("?", 1)[0].rstrip("/")
+    return normalized or None
+
+
+def _normalize_candidate_handle(handle: str | None) -> str | None:
+    if not handle:
+        return None
+    return _normalize_handle(handle).lower()
+
+
+def _extract_channel_id_from_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    match = _CHANNEL_URL_ID_PATTERN.search(url)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _enrich_candidate_with_youtube_api(
+    candidate: YouTubeCandidate,
+    config: YouTubeSearchConfig,
+) -> YouTubeCandidate:
+    api_key = config.youtube_api_key or os.getenv("YOUTUBE_API_KEY")
+    if not api_key:
+        return candidate
+
+    channel_id = candidate.channel_id or _extract_channel_id_from_url(candidate.url)
+    if not channel_id:
+        return candidate
+
+    client = httpx.Client(timeout=10)
+    try:
+        response = _with_retry(
+            lambda: client.get(
+                "https://www.googleapis.com/youtube/v3/channels",
+                params={
+                    "part": "snippet,statistics",
+                    "id": channel_id,
+                    "key": api_key,
+                },
+            ),
+            attempts=config.retry_attempts,
+            backoff=config.retry_backoff,
+        )
+        items = response.json().get("items", [])
+        if not items:
+            return candidate
+        item = items[0]
+        if not isinstance(item, dict):
+            return candidate
+        snippet = item.get("snippet", {}) if isinstance(item.get("snippet"), dict) else {}
+        statistics = (
+            item.get("statistics", {}) if isinstance(item.get("statistics"), dict) else {}
+        )
+        api_channel_id = item.get("id") if isinstance(item.get("id"), str) else channel_id
+        custom_url = snippet.get("customUrl")
+        api_handle = (
+            _normalize_handle(custom_url)
+            if isinstance(custom_url, str) and custom_url.startswith("@")
+            else candidate.handle
+        )
+        api_url = _build_channel_url(api_channel_id, api_handle) or candidate.url
+        subs_raw = statistics.get("subscriberCount")
+        api_subscribers = (
+            int(subs_raw) if isinstance(subs_raw, str) and subs_raw.isdigit() else candidate.subscriber_count
+        )
+        return YouTubeCandidate(
+            title=snippet.get("title") if isinstance(snippet.get("title"), str) else candidate.title,
+            handle=api_handle,
+            url=api_url,
+            subscriber_count=api_subscribers,
+            channel_id=api_channel_id,
+            source=f"{candidate.source}+youtube-api",
+        )
+    except Exception:
+        LOGGER.warning("YouTube API enrichment failed for channel_id=%s", channel_id)
+        return candidate
+
+
+def _validate_with_websearch(
+    candidate: YouTubeCandidate,
+    queries: list[str],
+    config: YouTubeSearchConfig,
+) -> bool:
+    if not config.web_validation:
+        return True
+
+    candidate_url = _normalize_url(candidate.url)
+    candidate_handle = _normalize_candidate_handle(candidate.handle)
+    if not candidate_url and not candidate_handle and not candidate.channel_id:
+        return False
+
+    validation_queries: list[str] = []
+    for query in queries[: config.web_validation_queries]:
+        query = query.strip()
+        if query:
+            validation_queries.append(f"{query} youtube")
+    if candidate.handle:
+        validation_queries.append(candidate.handle)
+    if candidate.url:
+        validation_queries.append(candidate.url)
+
+    web_candidates = _search_websearch(validation_queries, config)
+    if not web_candidates:
+        return False
+
+    for web_candidate in web_candidates:
+        if candidate_url and _normalize_url(web_candidate.url) == candidate_url:
+            return True
+        if candidate_handle and _normalize_candidate_handle(web_candidate.handle) == candidate_handle:
+            return True
+        if candidate.channel_id and web_candidate.channel_id == candidate.channel_id:
+            return True
+    return False
 
 
 def find_best_youtube_channel(
@@ -451,13 +732,28 @@ def find_best_youtube_channel(
         )
 
     if best is None:
-        web_candidates = _search_websearch_serper(queries, config)
+        web_candidates = _search_websearch(queries, config)
         best, best_score, accepted = _select_best_candidate(
             web_candidates, tokens, config.score_threshold
         )
+    if best is None:
+        domain_fallback = _search_domain_first_hit(queries, config)
+        if domain_fallback is not None:
+            best = domain_fallback
+            best_score = config.score_threshold
+            accepted = True
 
     if best is None:
         return None
+    best = _enrich_candidate_with_youtube_api(best, config)
+    if accepted and not _validate_with_websearch(best, queries, config):
+        accepted = False
+        LOGGER.warning(
+            "YouTube candidate failed web validation: url=%s handle=%s source=%s",
+            best.url,
+            best.handle,
+            best.source,
+        )
     if not accepted:
         return YouTubeChannelData(
             handle=best.handle,
@@ -471,16 +767,22 @@ def find_best_youtube_channel(
 
     LOGGER.info("YouTube source channel: %s", best.url)
 
-    videos = _with_retry(
-        lambda: scrapetube.get_channel(
-            channel_id=best.channel_id,
-            channel_url=best.url if best.channel_id is None else None,
-            limit=config.videos_limit,
-            sleep=config.request_sleep,
-        ),
-        attempts=config.retry_attempts,
-        backoff=config.retry_backoff,
-    )
+    try:
+        videos = _with_retry(
+            lambda: list(
+                scrapetube.get_channel(
+                    channel_id=best.channel_id,
+                    channel_url=best.url if best.channel_id is None else None,
+                    limit=config.videos_limit,
+                    sleep=config.request_sleep,
+                )
+            ),
+            attempts=config.retry_attempts,
+            backoff=config.retry_backoff,
+        )
+    except Exception:
+        LOGGER.warning("Failed to fetch YouTube videos for %s", best.url)
+        videos = []
     video_results = _coerce_video_results(videos)
     days_list = [
         days
@@ -489,17 +791,23 @@ def find_best_youtube_channel(
     ]
     publishing_cadence = _cadence_from_days(days_list)
 
-    oldest_video = _with_retry(
-        lambda: scrapetube.get_channel(
-            channel_id=best.channel_id,
-            channel_url=best.url if best.channel_id is None else None,
-            limit=1,
-            sort_by="oldest",
-            sleep=config.request_sleep,
-        ),
-        attempts=config.retry_attempts,
-        backoff=config.retry_backoff,
-    )
+    try:
+        oldest_video = _with_retry(
+            lambda: list(
+                scrapetube.get_channel(
+                    channel_id=best.channel_id,
+                    channel_url=best.url if best.channel_id is None else None,
+                    limit=1,
+                    sort_by="oldest",
+                    sleep=config.request_sleep,
+                )
+            ),
+            attempts=config.retry_attempts,
+            backoff=config.retry_backoff,
+        )
+    except Exception:
+        LOGGER.warning("Failed to fetch oldest YouTube video for %s", best.url)
+        oldest_video = []
     oldest_results = _coerce_video_results(oldest_video)
     oldest_days = None
     if oldest_results:
@@ -534,7 +842,7 @@ def _with_retry(func, *, attempts: int, backoff: float):
             return func()
         except Exception as exc:  # pragma: no cover - defensive
             last_error = exc
-            LOGGER.warning("YouTube lookup failed (attempt %s/%s).", attempt + 1, attempts)
+            LOGGER.debug("YouTube lookup retry (attempt %s/%s).", attempt + 1, attempts)
             time.sleep(backoff * (attempt + 1))
     if last_error:
         raise last_error

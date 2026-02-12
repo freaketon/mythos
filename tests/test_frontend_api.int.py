@@ -1,0 +1,236 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import sys
+
+from fastapi.testclient import TestClient
+import pytest
+
+from src.web_app import create_app
+
+
+def test_status_reports_idle_when_no_run(tmp_path: Path) -> None:
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/run/status")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "idle"
+    assert payload["processed"] == 0
+    assert payload["total"] == 0
+    assert payload["remaining"] == 0
+
+
+def test_status_parses_checkpoint_progress(tmp_path: Path) -> None:
+    err_log = tmp_path / "run.20260212-120000.err.log"
+    err_log.write_text(
+        "INFO: Checkpoint: processed=120/3006 remaining=2886 valid=120 invalid=0 youtube=84 instagram=31 low_conf=22\n",
+        encoding="utf-8",
+    )
+    state = tmp_path / "run.state.json"
+    state.write_text(json.dumps({"err_log_path": err_log.name}), encoding="utf-8")
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/run/status")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["processed"] == 120
+    assert payload["total"] == 3006
+    assert payload["remaining"] == 2886
+    assert payload["hydrated_youtube"] == 84
+    assert payload["hydrated_instagram"] == 31
+    assert payload["low_confidence"] == 22
+
+
+def test_status_ignores_stale_default_logs_without_state(tmp_path: Path) -> None:
+    err_log = tmp_path / "run.full.err.log"
+    err_log.write_text(
+        "INFO: Checkpoint: processed=999/1000 remaining=1 valid=999 invalid=0 youtube=500 instagram=400 low_conf=10\n",
+        encoding="utf-8",
+    )
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/run/status")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "idle"
+    assert payload["processed"] == 0
+    assert payload["total"] == 0
+
+
+def test_files_endpoint_reports_row_counts(tmp_path: Path) -> None:
+    output = tmp_path / "MVI - Elite Outreach List & Tracker - Master List - Elite - Intake - 3009 - 11_16_2025.hydrated.full.csv"
+    low_conf = tmp_path / "MVI - Elite Outreach List & Tracker - Master List - Elite - Intake - 3009 - 11_16_2025.low-confidence.full.csv"
+    output.write_text("a,b\n1,2\n3,4\n", encoding="utf-8")
+    low_conf.write_text("x,y\n9,8\n", encoding="utf-8")
+
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/run/files")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["output"]["rows"] == 2
+    assert payload["low_confidence"]["rows"] == 1
+
+
+def test_input_preview_returns_headers_and_rows(tmp_path: Path) -> None:
+    input_csv = tmp_path / "sample.csv"
+    input_csv.write_text("A,B\n1,2\n3,4\n", encoding="utf-8")
+    state = tmp_path / "run.state.json"
+    state.write_text(
+        json.dumps(
+            {
+                "pid": 123,
+                "input_path": "sample.csv",
+                "command": ["python", "-m", "src.main", "--input", "sample.csv"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/run/input-preview?limit=1")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["headers"] == ["A", "B"]
+    assert payload["rows"] == [["1", "2"]]
+
+
+def test_events_endpoint_streams_from_offset(tmp_path: Path) -> None:
+    events = tmp_path / "run.events.jsonl"
+    events.write_text(
+        '{"row_number":2,"name":"Alice","youtube":"hit","instagram":"no_hit"}\n'
+        '{"row_number":3,"name":"Bob","youtube":"no_hit","instagram":"hit"}\n',
+        encoding="utf-8",
+    )
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/run/events?offset=1&limit=10")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["next_offset"] == 2
+    assert payload["events"] == [
+        {"row_number": 3, "name": "Bob", "youtube": "no_hit", "instagram": "hit"}
+    ]
+
+
+def test_output_preview_reads_hydrated_csv(tmp_path: Path) -> None:
+    output_csv = tmp_path / "hydrated.csv"
+    output_csv.write_text("X,Y\na,b\nc,d\n", encoding="utf-8")
+    state = tmp_path / "run.state.json"
+    state.write_text(json.dumps({"output_path": "hydrated.csv"}), encoding="utf-8")
+
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+    response = client.get("/run/output-preview?limit=1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["headers"] == ["X", "Y"]
+    assert payload["rows"] == [["c", "d"]]
+
+
+def test_run_start_returns_409_when_artifact_unlink_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    output = tmp_path / "MVI - Elite Outreach List & Tracker - Master List - Elite - Intake - 3009 - 11_16_2025.hydrated.full.csv"
+    output.write_text("a,b\n", encoding="utf-8")
+    low_conf = tmp_path / "MVI - Elite Outreach List & Tracker - Master List - Elite - Intake - 3009 - 11_16_2025.low-confidence.full.csv"
+    low_conf.write_text("a,b\n", encoding="utf-8")
+
+    def fail_unlink(self: Path, missing_ok: bool = False) -> None:
+        raise OSError("sharing violation")
+
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+    response = client.post("/run/start", json={})
+
+    assert response.status_code == 409
+    assert "File in use" in response.json()["detail"]
+
+
+def test_run_start_uses_current_python_interpreter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    input_csv = tmp_path / "input.csv"
+    input_csv.write_text("Name,Email\nAlice,alice@example.com\n", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    class FakeProc:
+        pid = 99999
+
+    def fake_popen(cmd, cwd, stdout, stderr, start_new_session, close_fds):  # type: ignore[no-untyped-def]
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        captured["start_new_session"] = start_new_session
+        captured["close_fds"] = close_fds
+        return FakeProc()
+
+    monkeypatch.setattr("src.web_app.subprocess.Popen", fake_popen)
+
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+    response = client.post(
+        "/run/start",
+        json={
+            "input_path": "input.csv",
+            "output_path": "out.csv",
+            "low_confidence_path": "low.csv",
+            "checkpoint_every": 1,
+            "limit": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    assert cmd[0] == sys.executable
+    assert cmd[1:4] == ["-u", "-m", "src.main"]
+    assert captured["start_new_session"] is True
+    assert captured["close_fds"] is True
+
+
+def test_run_start_keeps_web_endpoints_responsive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    input_csv = tmp_path / "input.csv"
+    input_csv.write_text("Name,Email\nAlice,alice@example.com\n", encoding="utf-8")
+
+    class FakeProc:
+        pid = 54321
+
+    def fake_popen(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return FakeProc()
+
+    monkeypatch.setattr("src.web_app.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("src.web_app._is_pid_alive", lambda pid: bool(pid))
+
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    start_response = client.post(
+        "/run/start",
+        json={
+            "input_path": "input.csv",
+            "output_path": "out.csv",
+            "low_confidence_path": "low.csv",
+            "youtube": False,
+            "instagram": False,
+            "checkpoint_every": 1,
+            "limit": 1,
+        },
+    )
+    assert start_response.status_code == 200
+
+    status_response = client.get("/run/status")
+    assert status_response.status_code == 200
+    state = status_response.json()["state"]
+    assert state == "running"
+
+    # Regression guard: app process remains responsive after starting a run.
+    preview_response = client.get("/run/input-preview?limit=5")
+    assert preview_response.status_code == 200

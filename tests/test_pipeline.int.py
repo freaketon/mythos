@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from src.adapters.instagram import InstagramProfileData
 from src.adapters.youtube import YouTubeChannelData
 from src.csv_pipeline import copy_csv_rows
@@ -59,3 +61,47 @@ def test_pipeline_mixed_rows_summary(tmp_path: Path) -> None:
     output_text = output_csv.read_text(encoding="utf-8")
     assert "MrBeast" in output_text
     assert "NoMatch" in output_text
+
+
+def test_checkpoint_persists_partial_progress_on_failure(tmp_path: Path) -> None:
+    input_csv = tmp_path / "input.csv"
+    output_csv = tmp_path / "output.csv"
+    low_conf_csv = tmp_path / "low_conf.csv"
+    input_csv.write_text(
+        "Name,Email,Company URL\n"
+        "First,first@example.com,https://example.com\n"
+        "Second,second@example.com,https://example.com\n",
+        encoding="utf-8",
+    )
+
+    call_count = 0
+
+    def flaky_youtube_lookup(_queries: list[str]) -> YouTubeChannelData | None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return YouTubeChannelData(
+                handle="@first",
+                url="https://www.youtube.com/@first",
+                confidence=42,
+                source="test",
+                accepted=False,
+            )
+        raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        copy_csv_rows(
+            input_csv,
+            output_csv,
+            youtube_lookup=flaky_youtube_lookup,
+            checkpoint_every=1,
+            low_confidence_report_path=low_conf_csv,
+        )
+
+    output_lines = output_csv.read_text(encoding="utf-8").splitlines()
+    assert len(output_lines) == 2
+    assert "First" in output_lines[1]
+
+    low_conf_lines = low_conf_csv.read_text(encoding="utf-8").splitlines()
+    assert len(low_conf_lines) == 2
+    assert "@first" in low_conf_lines[1]

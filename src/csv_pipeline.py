@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
+import os
 import re
+from datetime import datetime, timezone
 from collections import Counter
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TextIO
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
@@ -112,6 +115,20 @@ def _build_youtube_query(headers: list[str], row: list[str]) -> str | None:
     return query or None
 
 
+def _build_instagram_query(headers: list[str], row: list[str]) -> str | None:
+    base_query = _build_youtube_query(headers, row)
+    other = _first_value(headers, row, "Other")
+    company_url = _first_value(headers, row, "Company URL")
+    bio = _first_value(
+        headers,
+        row,
+        "What's your Twitter bio? (Describe who you help and how you help them in 3 sentences or less).",
+    )
+    parts = [base_query or "", other, company_url, bio]
+    query = " ".join(part.strip() for part in parts if part and part.strip())
+    return query or None
+
+
 def _build_youtube_queries(headers: list[str], row: list[str]) -> list[str]:
     hint_handle, hint_url = _extract_youtube_hint(headers, row)
     base_query = _build_youtube_query(headers, row)
@@ -181,6 +198,21 @@ def _extract_youtube_hint(headers: list[str], row: list[str]) -> tuple[str | Non
     return handle, channel_url
 
 
+def _count_data_rows(input_path: Path) -> int:
+    with input_path.open("r", encoding="utf-8", newline="") as input_file:
+        reader = csv.reader(input_file)
+        next(reader, None)
+        return sum(1 for _ in reader)
+
+
+def _emit_event(events_file: TextIO | None, payload: dict[str, object]) -> None:
+    if events_file is None:
+        return
+    payload_with_ts = {"ts": datetime.now(timezone.utc).isoformat(), **payload}
+    events_file.write(json.dumps(payload_with_ts) + "\n")
+    events_file.flush()
+
+
 def copy_csv_rows(
     input_path: Path,
     output_path: Path,
@@ -190,8 +222,38 @@ def copy_csv_rows(
     instagram_lookup: Callable[[str], InstagramProfileData | None] | None = None,
     row_limit: int | None = None,
     low_confidence_report_path: Path | None = None,
+    checkpoint_every: int = 100,
+    events_path: Path | None = None,
 ) -> ValidationReport:
     report = ValidationReport()
+    rows_since_checkpoint = 0
+    total_rows_planned = _count_data_rows(input_path)
+    if row_limit is not None:
+        total_rows_planned = min(total_rows_planned, row_limit)
+    low_confidence_file = None
+    low_confidence_writer: csv.writer | None = None
+    events_file = None
+
+    if low_confidence_report_path is not None:
+        low_confidence_file = low_confidence_report_path.open(
+            "w",
+            encoding="utf-8",
+            newline="",
+        )
+        low_confidence_writer = csv.writer(low_confidence_file)
+        low_confidence_writer.writerow(
+            [
+                "row_number",
+                "queries",
+                "candidate_url",
+                "candidate_handle",
+                "confidence",
+                "source",
+            ]
+        )
+    if events_path is not None:
+        events_file = events_path.open("w", encoding="utf-8", newline="\n")
+
     with input_path.open("r", encoding="utf-8", newline="") as input_file:
         reader = csv.reader(input_file)
         headers = next(reader, None)
@@ -223,6 +285,15 @@ def copy_csv_rows(
                         RowValidationIssue(row_number=line_number, message=message)
                     )
                     LOGGER.warning("Row %s skipped: %s", line_number, message)
+                    _emit_event(
+                        events_file,
+                        {
+                            "type": "invalid_row",
+                            "row_number": line_number,
+                            "status": "invalid",
+                            "reason": message,
+                        },
+                    )
                     continue
 
                 try:
@@ -236,15 +307,48 @@ def copy_csv_rows(
                         RowValidationIssue(row_number=line_number, message=message)
                     )
                     LOGGER.warning("Row %s skipped: %s", line_number, message)
+                    _emit_event(
+                        events_file,
+                        {
+                            "type": "invalid_row",
+                            "row_number": line_number,
+                            "status": "invalid",
+                            "reason": "validation_error",
+                        },
+                    )
                     continue
 
                 report.valid_rows += 1
+                row_name = _first_value(headers, row, "Name")
+                _emit_event(
+                    events_file,
+                    {
+                        "type": "row_start",
+                        "row_number": line_number,
+                        "name": row_name,
+                        "item": row_name or f"row {line_number}",
+                        "status": "searching",
+                        "method": "row-initialization",
+                    },
+                )
 
                 youtube_values = ["", "", "", "", ""]
+                youtube_status = "disabled"
                 if youtube_lookup:
                     hint_handle, hint_url = _extract_youtube_hint(headers, row)
                     queries = _build_youtube_queries(headers, row)
                     if queries:
+                        _emit_event(
+                            events_file,
+                            {
+                                "type": "youtube_searching",
+                                "row_number": line_number,
+                                "name": row_name,
+                                "item": row_name or f"row {line_number}",
+                                "status": "searching",
+                                "method": "multi-source-candidate-search",
+                            },
+                        )
                         result = youtube_lookup(queries)
                         if result and result.accepted:
                             resolved_handle = result.handle or hint_handle
@@ -261,18 +365,32 @@ def copy_csv_rows(
                             report.hydrated_youtube_rows += 1
                             source = result.source_url or resolved_url
                             if source:
-                                LOGGER.info("YouTube source URL: %s", source)
+                                LOGGER.info("YouTube HIT row=%s source=%s", line_number, source)
+                            youtube_status = "hit"
                         elif result and not result.accepted:
-                            report.low_confidence_rows.append(
-                                LowConfidenceIssue(
-                                    row_number=line_number,
-                                    queries=queries,
-                                    candidate_url=result.url,
-                                    candidate_handle=result.handle,
-                                    confidence=result.confidence,
-                                    source=result.source,
-                                )
+                            issue = LowConfidenceIssue(
+                                row_number=line_number,
+                                queries=queries,
+                                candidate_url=result.url,
+                                candidate_handle=result.handle,
+                                confidence=result.confidence,
+                                source=result.source,
                             )
+                            report.low_confidence_rows.append(issue)
+                            if low_confidence_writer is not None:
+                                low_confidence_writer.writerow(
+                                    [
+                                        issue.row_number,
+                                        " | ".join(issue.queries),
+                                        issue.candidate_url or "",
+                                        issue.candidate_handle or "",
+                                        issue.confidence
+                                        if issue.confidence is not None
+                                        else "",
+                                        issue.source or "",
+                                    ]
+                                )
+                            youtube_status = "low_confidence"
                         else:
                             if hint_handle or hint_url:
                                 youtube_values = [
@@ -284,25 +402,67 @@ def copy_csv_rows(
                                 ]
                                 report.hydrated_youtube_rows += 1
                                 LOGGER.info(
-                                    "YouTube hint used for row %s (queries=%s).",
+                                    "YouTube HIT row=%s source=hint",
                                     line_number,
-                                    queries,
                                 )
+                                youtube_status = "hit_hint"
                             else:
                                 report.warning_rows += 1
-                                LOGGER.warning(
-                                    "No YouTube match for row %s (queries=%s).",
-                                    line_number,
-                                    queries,
-                                )
+                                LOGGER.info("YouTube NO_HIT row=%s", line_number)
+                                youtube_status = "no_hit"
+                        _emit_event(
+                            events_file,
+                            {
+                                "type": "youtube_result",
+                                "row_number": line_number,
+                                "name": row_name,
+                                "item": row_name or f"row {line_number}",
+                                "status": youtube_status,
+                                "method": result.source if result else "unknown",
+                                "youtube_handle": youtube_values[0],
+                                "youtube_url": youtube_values[1],
+                                "youtube_subs_count": youtube_values[2],
+                                "youtube_publishing_cadence": youtube_values[3],
+                                "youtube_channel_age": youtube_values[4],
+                            },
+                        )
                     else:
                         report.warning_rows += 1
-                        LOGGER.warning("No YouTube query data for row %s.", line_number)
+                        LOGGER.info("YouTube NO_HIT row=%s reason=no_query", line_number)
+                        youtube_status = "no_query"
+                        _emit_event(
+                            events_file,
+                            {
+                                "type": "youtube_result",
+                                "row_number": line_number,
+                                "name": row_name,
+                                "item": row_name or f"row {line_number}",
+                                "status": youtube_status,
+                                "method": "no-query",
+                                "youtube_handle": youtube_values[0],
+                                "youtube_url": youtube_values[1],
+                                "youtube_subs_count": youtube_values[2],
+                                "youtube_publishing_cadence": youtube_values[3],
+                                "youtube_channel_age": youtube_values[4],
+                            },
+                        )
 
                 instagram_values = ["", "", "", ""]
+                instagram_status = "disabled"
                 if instagram_lookup:
-                    query = _build_youtube_query(headers, row)
+                    query = _build_instagram_query(headers, row)
                     if query:
+                        _emit_event(
+                            events_file,
+                            {
+                                "type": "instagram_searching",
+                                "row_number": line_number,
+                                "name": row_name,
+                                "item": row_name or f"row {line_number}",
+                                "status": "searching",
+                                "method": "instaloader+web-validation",
+                            },
+                        )
                         result = instagram_lookup(query)
                         if result:
                             instagram_values = [
@@ -315,19 +475,96 @@ def copy_csv_rows(
                             ]
                             report.hydrated_instagram_rows += 1
                             if result.source_url:
-                                LOGGER.info("Instagram source URL: %s", result.source_url)
+                                LOGGER.info("Instagram HIT row=%s source=%s", line_number, result.source_url)
+                            instagram_status = "hit"
                         else:
                             report.warning_rows += 1
-                            LOGGER.warning(
-                                "No Instagram match for row %s (query=%s).",
-                                line_number,
-                                query,
-                            )
+                            LOGGER.info("Instagram NO_HIT row=%s", line_number)
+                            instagram_status = "no_hit"
+                        _emit_event(
+                            events_file,
+                            {
+                                "type": "instagram_result",
+                                "row_number": line_number,
+                                "name": row_name,
+                                "item": row_name or f"row {line_number}",
+                                "status": instagram_status,
+                                "method": "instaloader+web-validation",
+                                "instagram_handle": instagram_values[0],
+                                "instagram_followers": instagram_values[1],
+                                "instagram_publishing_cadence": instagram_values[2],
+                                "instagram_account_age": instagram_values[3],
+                            },
+                        )
                     else:
                         report.warning_rows += 1
-                        LOGGER.warning("No Instagram query data for row %s.", line_number)
+                        LOGGER.info("Instagram NO_HIT row=%s reason=no_query", line_number)
+                        instagram_status = "no_query"
+                        _emit_event(
+                            events_file,
+                            {
+                                "type": "instagram_result",
+                                "row_number": line_number,
+                                "name": row_name,
+                                "item": row_name or f"row {line_number}",
+                                "status": instagram_status,
+                                "method": "no-query",
+                                "instagram_handle": instagram_values[0],
+                                "instagram_followers": instagram_values[1],
+                                "instagram_publishing_cadence": instagram_values[2],
+                                "instagram_account_age": instagram_values[3],
+                            },
+                        )
 
                 writer.writerow(row + youtube_values + instagram_values)
+                _emit_event(
+                    events_file,
+                    {
+                        "type": "row_complete",
+                        "row_number": line_number,
+                        "name": row_name,
+                        "item": row_name or f"row {line_number}",
+                        "youtube": youtube_status,
+                        "instagram": instagram_status,
+                        "method": "write-output-row",
+                        "youtube_handle": youtube_values[0],
+                        "youtube_url": youtube_values[1],
+                        "youtube_subs_count": youtube_values[2],
+                        "youtube_publishing_cadence": youtube_values[3],
+                        "youtube_channel_age": youtube_values[4],
+                        "instagram_handle": instagram_values[0],
+                        "instagram_followers": instagram_values[1],
+                        "instagram_publishing_cadence": instagram_values[2],
+                        "instagram_account_age": instagram_values[3],
+                    },
+                )
+                rows_since_checkpoint += 1
+
+                if checkpoint_every > 0 and rows_since_checkpoint >= checkpoint_every:
+                    output_file.flush()
+                    os.fsync(output_file.fileno())
+                    if low_confidence_file is not None:
+                        low_confidence_file.flush()
+                        os.fsync(low_confidence_file.fileno())
+                    remaining_rows = max(0, total_rows_planned - report.total_rows)
+                    LOGGER.info(
+                        "Checkpoint: processed=%s/%s remaining=%s valid=%s invalid=%s youtube=%s instagram=%s low_conf=%s",
+                        report.total_rows,
+                        total_rows_planned,
+                        remaining_rows,
+                        report.valid_rows,
+                        report.invalid_rows,
+                        report.hydrated_youtube_rows,
+                        report.hydrated_instagram_rows,
+                        len(report.low_confidence_rows),
+                    )
+                    rows_since_checkpoint = 0
+                    if events_file is not None:
+                        events_file.flush()
+                        os.fsync(events_file.fileno())
+
+            output_file.flush()
+            os.fsync(output_file.fileno())
 
     LOGGER.info(
         "Validation summary: total=%s valid=%s invalid=%s youtube=%s instagram=%s warnings=%s",
@@ -339,29 +576,13 @@ def copy_csv_rows(
         report.warning_rows,
     )
 
-    if low_confidence_report_path and report.low_confidence_rows:
-        with low_confidence_report_path.open("w", encoding="utf-8", newline="") as report_file:
-            writer = csv.writer(report_file)
-            writer.writerow(
-                [
-                    "row_number",
-                    "queries",
-                    "candidate_url",
-                    "candidate_handle",
-                    "confidence",
-                    "source",
-                ]
-            )
-            for issue in report.low_confidence_rows:
-                writer.writerow(
-                    [
-                        issue.row_number,
-                        " | ".join(issue.queries),
-                        issue.candidate_url or "",
-                        issue.candidate_handle or "",
-                        issue.confidence if issue.confidence is not None else "",
-                        issue.source or "",
-                    ]
-                )
+    if low_confidence_file is not None:
+        low_confidence_file.flush()
+        os.fsync(low_confidence_file.fileno())
+        low_confidence_file.close()
+    if events_file is not None:
+        events_file.flush()
+        os.fsync(events_file.fileno())
+        events_file.close()
 
     return report
