@@ -887,14 +887,8 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
             v.youtube_handle,
             v.youtube_url,
             v.youtube_source || '',
-            (() => {
-              const c = (v.youtube_confidence ?? '');
-              const why = String(v.youtube_confidence_reason || '').trim();
-              if (c === '' && !why) return '';
-              if (c === '') return why;
-              if (!why) return String(c);
-              return String(c) + ' ' + why;
-            })(),
+            v.youtube_confidence ?? '',
+            v.youtube_confidence_reason || '',
             (Array.isArray(v.youtube_evidence_sources) ? v.youtube_evidence_sources.join(', ') : (v.youtube_evidence_sources || '')),
             (typeof v.youtube_content_affinity === 'number' ? v.youtube_content_affinity.toFixed(2) : (v.youtube_content_affinity || '')),
             v.youtube_subs_count,
@@ -911,7 +905,8 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
             'youtube_handle',
             'youtube_url',
             'youtube_source',
-            'youtube_conf (why)',
+            'youtube_conf',
+            'yt_conf_why',
             'youtube_evidence',
             'yt_affinity',
             'youtube_subs',
@@ -995,7 +990,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         const name = (v && v.name) ? v.name : (low ? ('row ' + low.row_number) : ('row ' + selectedRowKey));
         const url = v ? (v.youtube_url || '') : '';
         const handle = v ? (v.youtube_handle || '') : '';
-        const status = v ? (v.youtube_status || '') : '';
+	        const status = v ? (v.youtube_status || '') : '';
 	        const source = v ? (v.youtube_source || '') : (low ? (low.source || '') : '');
 	        const conf = v ? (v.youtube_confidence ?? '') : (low ? (low.confidence || '') : '');
 	        const confWhy = v ? (v.youtube_confidence_reason || '') : '';
@@ -1013,7 +1008,8 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
 	          '<div class=\"k\">YouTube URL</div><div class=\"mono\">' + (open ? open + ' ' : '') + esc(url) + '</div>' +
 	          '<div class=\"k\">YouTube handle</div><div class=\"mono\">' + esc(handle) + '</div>' +
 	          '<div class=\"k\">Source</div><div class=\"mono\">' + esc(source) + '</div>' +
-	          '<div class=\"k\">Confidence</div><div class=\"mono\">' + esc(conf) + (confWhy ? (' <span class=\"k\">(' + esc(confWhy) + ')</span>') : '') + '</div>' +
+	          '<div class=\"k\">Confidence</div><div class=\"mono\">' + esc(conf) + '</div>' +
+	          '<div class=\"k\">Conf why</div><div class=\"mono\">' + esc(confWhy || '') + '</div>' +
 	          '<div class=\"k\">Evidence</div><div class=\"mono\">' + esc(evidence) + '</div>' +
 	          '<div class=\"k\">Content affinity</div><div class=\"mono\">' + esc((typeof affinity === 'number') ? affinity.toFixed(2) : (affinity || '')) + '</div>' +
 	          '</div>' +
