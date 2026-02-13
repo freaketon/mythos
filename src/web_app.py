@@ -875,6 +875,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
               String(v.youtube_handle || '') + ' ' +
               String(v.youtube_url || '') + ' ' +
               String(v.youtube_source || '') + ' ' +
+              String(v.youtube_confidence_reason || '') + ' ' +
               String(v.youtube_queries || '')
             ).toLowerCase();
             return blob.includes(filterText);
@@ -886,7 +887,14 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
             v.youtube_handle,
             v.youtube_url,
             v.youtube_source || '',
-            v.youtube_confidence ?? '',
+            (() => {
+              const c = (v.youtube_confidence ?? '');
+              const why = String(v.youtube_confidence_reason || '').trim();
+              if (c === '' && !why) return '';
+              if (c === '') return why;
+              if (!why) return String(c);
+              return String(c) + ' ' + why;
+            })(),
             (Array.isArray(v.youtube_evidence_sources) ? v.youtube_evidence_sources.join(', ') : (v.youtube_evidence_sources || '')),
             (typeof v.youtube_content_affinity === 'number' ? v.youtube_content_affinity.toFixed(2) : (v.youtube_content_affinity || '')),
             v.youtube_subs_count,
@@ -903,7 +911,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
             'youtube_handle',
             'youtube_url',
             'youtube_source',
-            'youtube_conf',
+            'youtube_conf (why)',
             'youtube_evidence',
             'yt_affinity',
             'youtube_subs',
@@ -988,26 +996,27 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         const url = v ? (v.youtube_url || '') : '';
         const handle = v ? (v.youtube_handle || '') : '';
         const status = v ? (v.youtube_status || '') : '';
-        const source = v ? (v.youtube_source || '') : (low ? (low.source || '') : '');
-        const conf = v ? (v.youtube_confidence ?? '') : (low ? (low.confidence || '') : '');
-        const affinity = v ? v.youtube_content_affinity : null;
-        const evidence = v && v.youtube_evidence_sources ? (Array.isArray(v.youtube_evidence_sources) ? v.youtube_evidence_sources.join(', ') : String(v.youtube_evidence_sources)) : '';
-        const queries = v && v.youtube_queries ? (Array.isArray(v.youtube_queries) ? v.youtube_queries.join('\\n') : String(v.youtube_queries)) : (low ? (low.queries || '') : '');
-        const titles = v && Array.isArray(v.youtube_recent_titles) ? v.youtube_recent_titles : [];
-        const open = safeUrl(url) ? ('<a href=\"' + esc(url) + '\" target=\"_blank\" rel=\"noreferrer\">open</a>') : '';
+	        const source = v ? (v.youtube_source || '') : (low ? (low.source || '') : '');
+	        const conf = v ? (v.youtube_confidence ?? '') : (low ? (low.confidence || '') : '');
+	        const confWhy = v ? (v.youtube_confidence_reason || '') : '';
+	        const affinity = v ? v.youtube_content_affinity : null;
+	        const evidence = v && v.youtube_evidence_sources ? (Array.isArray(v.youtube_evidence_sources) ? v.youtube_evidence_sources.join(', ') : String(v.youtube_evidence_sources)) : '';
+	        const queries = v && v.youtube_queries ? (Array.isArray(v.youtube_queries) ? v.youtube_queries.join('\\n') : String(v.youtube_queries)) : (low ? (low.queries || '') : '');
+	        const titles = v && Array.isArray(v.youtube_recent_titles) ? v.youtube_recent_titles : [];
+	        const open = safeUrl(url) ? ('<a href=\"' + esc(url) + '\" target=\"_blank\" rel=\"noreferrer\">open</a>') : '';
 
         box.innerHTML = '' +
           '<div style=\"display:grid; grid-template-columns: 140px 1fr; gap: 6px 10px\">' +
           '<div class=\"k\">Row</div><div class=\"v\">' + esc(selectedRowKey) + '</div>' +
           '<div class=\"k\">Name</div><div class=\"v\">' + esc(name) + '</div>' +
           '<div class=\"k\">YouTube status</div><div class=\"mono\">' + esc(status) + '</div>' +
-          '<div class=\"k\">YouTube URL</div><div class=\"mono\">' + (open ? open + ' ' : '') + esc(url) + '</div>' +
-          '<div class=\"k\">YouTube handle</div><div class=\"mono\">' + esc(handle) + '</div>' +
-          '<div class=\"k\">Source</div><div class=\"mono\">' + esc(source) + '</div>' +
-          '<div class=\"k\">Confidence</div><div class=\"mono\">' + esc(conf) + '</div>' +
-          '<div class=\"k\">Evidence</div><div class=\"mono\">' + esc(evidence) + '</div>' +
-          '<div class=\"k\">Content affinity</div><div class=\"mono\">' + esc((typeof affinity === 'number') ? affinity.toFixed(2) : (affinity || '')) + '</div>' +
-          '</div>' +
+	          '<div class=\"k\">YouTube URL</div><div class=\"mono\">' + (open ? open + ' ' : '') + esc(url) + '</div>' +
+	          '<div class=\"k\">YouTube handle</div><div class=\"mono\">' + esc(handle) + '</div>' +
+	          '<div class=\"k\">Source</div><div class=\"mono\">' + esc(source) + '</div>' +
+	          '<div class=\"k\">Confidence</div><div class=\"mono\">' + esc(conf) + (confWhy ? (' <span class=\"k\">(' + esc(confWhy) + ')</span>') : '') + '</div>' +
+	          '<div class=\"k\">Evidence</div><div class=\"mono\">' + esc(evidence) + '</div>' +
+	          '<div class=\"k\">Content affinity</div><div class=\"mono\">' + esc((typeof affinity === 'number') ? affinity.toFixed(2) : (affinity || '')) + '</div>' +
+	          '</div>' +
           '<div style=\"margin-top:10px\"><div class=\"k\">Queries</div><pre class=\"mono\">' + esc(queries) + '</pre></div>' +
           '<div style=\"margin-top:10px\"><div class=\"k\">Recent video titles</div>' +
             (titles.length ? ('<ul style=\"margin:6px 0 0 16px\">' + titles.map(t => '<li class=\"mono\">' + esc(t) + '</li>').join('') + '</ul>') : '<div class=\"k\">(not available)</div>') +
@@ -1054,6 +1063,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
             existing.youtube_status = e.status || existing.youtube_status;
             existing.youtube_source = e.youtube_source || e.method || existing.youtube_source;
             existing.youtube_confidence = e.youtube_confidence ?? existing.youtube_confidence;
+            existing.youtube_confidence_reason = e.youtube_confidence_reason ?? existing.youtube_confidence_reason;
             existing.youtube_evidence_sources = e.youtube_evidence_sources || existing.youtube_evidence_sources;
             existing.youtube_content_affinity = e.youtube_content_affinity ?? existing.youtube_content_affinity;
             existing.youtube_recent_titles = e.youtube_recent_video_titles || existing.youtube_recent_titles;

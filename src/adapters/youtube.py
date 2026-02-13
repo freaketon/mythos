@@ -67,6 +67,7 @@ class YouTubeChannelData(BaseModel):
     channel_age: str | None = None
     source_url: str | None = None
     confidence: int | None = None
+    confidence_reason: str | None = None
     source: str | None = None
     evidence_sources: list[str] | None = None
     recent_video_titles: list[str] | None = None
@@ -2136,6 +2137,8 @@ def find_best_youtube_channel(
         config,
         evidence_sources=evidence_sources,
     )
+    llm_used_choice = llm_choice is not None
+    llm_used_reject = bool(llm_reject)
     if llm_reject:
         accepted = False
     elif llm_choice is not None:
@@ -2147,6 +2150,11 @@ def find_best_youtube_channel(
     best_identity = _candidate_identity(best)
     best_evidence = sorted(evidence_sources.get(best_identity, {best.source}))
     best_affinity = _content_affinity(signals, best)
+    content_mismatch = False
+    web_validation_failed = False
+    url_missing = False
+    api_required = False
+    api_verified: bool | None = None
 
     # Content sanity check: if the lead has strong anchors (domain / brand / email localpart),
     # don't accept a channel whose recent titles are completely unrelated unless we have
@@ -2155,6 +2163,7 @@ def find_best_youtube_channel(
         affinity = best_affinity
         if affinity is not None and affinity <= 0.0 and len(signals.anchor_tokens) >= 2:
             accepted = False
+            content_mismatch = True
             best = YouTubeCandidate(
                 title=best.title,
                 handle=best.handle,
@@ -2169,6 +2178,7 @@ def find_best_youtube_channel(
             best_evidence = sorted(evidence_sources.get(best_identity, {best.source}))
     if accepted and not _validate_with_websearch(best, queries, config):
         accepted = False
+        web_validation_failed = True
         LOGGER.warning(
             "YouTube candidate failed web validation: url=%s handle=%s source=%s",
             best.url,
@@ -2178,12 +2188,55 @@ def find_best_youtube_channel(
 
     if accepted and best.url and not _youtube_url_exists(best.url):
         accepted = False
+        url_missing = True
     # If we have a working YouTube API key, require API-verified existence for acceptance
     # unless the candidate came from explicit website evidence/hints.
     if accepted and _youtube_api_key(config) and not best.source.startswith(("hint", "website")):
-        api_verified = "youtube-api" in best.source or (best.channel_id is not None and best.subscriber_count is not None)
+        api_verified = "youtube-api" in best.source or (
+            best.channel_id is not None and best.subscriber_count is not None
+        )
         if not api_verified:
             accepted = False
+
+    if accepted is False and _youtube_api_key(config) and api_verified is False:
+        api_required = True
+
+    def _confidence_reason() -> str | None:
+        tags: list[str] = []
+        evidence = best_evidence or []
+        if any(s.startswith("hint") for s in evidence) or best.source.startswith("hint"):
+            tags.append("hint")
+        if any(s.startswith("website") for s in evidence) or best.source.startswith("website"):
+            tags.append("website-link")
+        if len(evidence) >= 2:
+            tags.append(f"multi-source({len(evidence)})")
+        if llm_used_choice:
+            tags.append("llm-pick")
+        if llm_used_reject:
+            tags.append("llm-reject")
+        if signals.anchor_tokens and best_affinity is not None:
+            if content_mismatch or best_affinity <= 0.0:
+                tags.append("content-mismatch")
+            elif best_affinity < 0.10:
+                tags.append("content-weak")
+            else:
+                tags.append("content-ok")
+        if web_validation_failed:
+            tags.append("web-fail")
+        if url_missing:
+            tags.append("404")
+        api_active = _youtube_api_key(config) is not None
+        if api_active:
+            if api_verified:
+                tags.append("api-verified")
+            elif api_required:
+                tags.append("api-needed")
+        if not tags and best.source:
+            tags.append(best.source.split("+", 1)[0])
+        if not tags:
+            return None
+        return ", ".join(tags[:5])
+
     if not accepted:
         api_active = _youtube_api_key(config) is not None
         recent_titles = None
@@ -2197,6 +2250,7 @@ def find_best_youtube_channel(
             subscriber_count=best.subscriber_count if api_active and "youtube-api" in best.source else None,
             source_url=best.url,
             confidence=best_score,
+            confidence_reason=_confidence_reason(),
             source=best.source,
             evidence_sources=best_evidence,
             recent_video_titles=recent_titles,
@@ -2276,6 +2330,7 @@ def find_best_youtube_channel(
         channel_age=channel_age,
         source_url=best.url,
         confidence=best_score,
+        confidence_reason=_confidence_reason(),
         source=best.source,
         evidence_sources=best_evidence,
         recent_video_titles=recent_titles,
