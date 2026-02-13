@@ -495,6 +495,8 @@ def copy_csv_rows(
                                             issue.source or "",
                                         ]
                                     )
+                                    if low_confidence_file is not None:
+                                        low_confidence_file.flush()
                                 youtube_status = "low_confidence"
                             else:
                                 if yt_url_norm and domains:
@@ -539,7 +541,7 @@ def copy_csv_rows(
                                     candidate_url=result.url,
                                     candidate_handle=result.handle,
                                     confidence=result.confidence,
-                                    source=result.source,
+                                    source=(result.confidence_reason or result.source),
                                 )
                                 report.low_confidence_rows.append(issue)
                                 if low_confidence_writer is not None:
@@ -555,6 +557,8 @@ def copy_csv_rows(
                                             issue.source or "",
                                         ]
                                     )
+                                    if low_confidence_file is not None:
+                                        low_confidence_file.flush()
                                 youtube_status = "low_confidence"
                         else:
                             if hint_handle or hint_url:
@@ -703,6 +707,8 @@ def copy_csv_rows(
                         )
 
                 writer.writerow(row + youtube_values + instagram_values)
+                # Always flush the hydrated CSV so results are visible immediately (not only at checkpoints).
+                output_file.flush()
                 _emit_event(
                     events_file,
                     {

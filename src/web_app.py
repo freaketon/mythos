@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -29,6 +29,41 @@ RUN_EVENTS = "run.events.jsonl"
 RUN_STATE = "run.state.json"
 
 _EVENT_STATS_CACHE: dict[str, dict[str, object]] = {}
+
+
+def _safe_relpath(value: str) -> Path:
+    """
+    Convert a user-supplied path into a safe, base-dir-relative path.
+    Browsers cannot provide local absolute paths; this prevents path traversal.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        raise ValueError("path is required")
+    if raw.startswith(("/", "\\")):
+        raise ValueError("absolute paths are not allowed")
+    if ".." in raw.replace("\\", "/").split("/"):
+        raise ValueError("parent path segments are not allowed")
+    return Path(raw)
+
+
+def _safe_upload_filename(name: str) -> str:
+    raw = (name or "").strip()
+    if not raw:
+        return "input.csv"
+    raw = raw.split("/")[-1].split("\\")[-1]
+    cleaned = []
+    for ch in raw:
+        if ch.isalnum() or ch in (" ", "-", "_", "."):
+            cleaned.append(ch)
+        else:
+            cleaned.append("_")
+    out = "".join(cleaned).strip().replace("  ", " ")
+    if not out.lower().endswith(".csv"):
+        out = out + ".csv"
+    # Prevent degenerate names.
+    if out in (".csv",):
+        out = "input.csv"
+    return out
 
 
 class RunStartRequest(BaseModel):
@@ -520,11 +555,15 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
     <div class="status">
       <b>Run Settings</b>
       <div class="run-settings-grid">
-        <div>
-          <div class="k">Input CSV</div>
-          <input id="inputPath" class="mono" type="text" value="MVI - Elite Outreach List & Tracker - Master List - Elite - Intake - 3009 - 11_16_2025.csv"
-            style="width:100%; padding:7px 10px; border:1px solid var(--line-strong); border-radius:10px" />
-        </div>
+	        <div>
+	          <div class="k">Input CSV</div>
+	          <div style="display:flex; gap:8px; align-items:center">
+	            <input id="inputPath" class="mono" type="text" value="MVI - Elite Outreach List & Tracker - Master List - Elite - Intake - 3009 - 11_16_2025.csv"
+	              style="flex:1; width:100%; padding:7px 10px; border:1px solid var(--line-strong); border-radius:10px" oninput="fetchInputPreview()" />
+	            <button type="button" onclick="browseInputCsv()">Browse...</button>
+	          </div>
+	          <input id="inputBrowse" type="file" accept=".csv,text/csv" style="display:none" />
+	        </div>
         <div>
           <div class="k">Output CSV (Hydrated)</div>
           <input id="outputPath" class="mono" type="text" value="MVI - Elite Outreach List & Tracker - Master List - Elite - Intake - 3009 - 11_16_2025.hydrated.full.csv"
@@ -751,12 +790,45 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
           setActivity('Idle', false);
         }
       }
-      async function fetchInputPreview() {
-        const r = await fetch('/run/input-preview?limit=20'); const p = await r.json();
-        const headers = p.headers.length ? p.headers : ['No input'];
-        const rows = p.rows.length ? p.rows : [['-']];
-        renderTable('inputTable', headers, rows);
-      }
+	      async function fetchInputPreview() {
+	        const input_path = String(document.getElementById('inputPath')?.value || '').trim();
+	        const qp = input_path ? ('&path=' + encodeURIComponent(input_path)) : '';
+	        const r = await fetch('/run/input-preview?limit=20' + qp); const p = await r.json();
+	        const headers = p.headers.length ? p.headers : ['No input'];
+	        const rows = p.rows.length ? p.rows : [['-']];
+	        renderTable('inputTable', headers, rows);
+	      }
+	      function browseInputCsv() {
+	        const el = document.getElementById('inputBrowse');
+	        if (el) el.click();
+	      }
+	      async function uploadInputCsv(file) {
+	        if (!file) return;
+	        setActivity('Uploading input CSV: ' + (file.name || '(unnamed)'), false);
+	        const buf = await file.arrayBuffer();
+	        const resp = await fetch('/run/upload-input', {
+	          method: 'POST',
+	          headers: {
+	            'Content-Type': 'text/csv',
+	            'X-Filename': String(file.name || 'input.csv'),
+	          },
+	          body: buf
+	        });
+	        if (!resp.ok) {
+	          const payload = await resp.json().catch(() => ({}));
+	          const detail = payload.detail || ('upload failed with status ' + resp.status);
+	          setActivity('Upload failed: ' + detail, false);
+	          return;
+	        }
+	        const payload = await resp.json().catch(() => ({}));
+	        const saved = String(payload.saved_as || '');
+	        if (saved) {
+	          const input = document.getElementById('inputPath');
+	          if (input) input.value = saved;
+	        }
+	        await fetchInputPreview();
+	        setActivity('Uploaded input CSV: ' + (saved || file.name), false);
+	      }
       async function preloadOutputPreview() {
         const r = await fetch('/run/output-preview?limit=200'); const p = await r.json();
         if (!p.rows || !p.rows.length) {
@@ -934,11 +1006,38 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         );
         wireRowClicks('outputTable');
       }
-      function renderInsights() {
-        // Duplicate channels among current outputRows.
-        const counts = new Map();
-        const names = new Map();
-        for (const v of outputRows.values()) {
+	      function renderInsights() {
+	        function lowConfExplain(src) {
+	          const raw = String(src || '').trim();
+	          const s = raw.toLowerCase();
+	          if (!s) return 'Needs review.';
+	          if (s === 'duplicate-guard') return 'Same channel assigned across unrelated leads/domains.';
+	          const tokens = raw.split(',').map(t => String(t || '').trim()).filter(Boolean);
+	          const phrases = [];
+	          for (const t of tokens) {
+	            const tl = t.toLowerCase();
+	            if (tl.startsWith('hint')) phrases.push('Came from a hint field.');
+	            else if (tl.startsWith('website-link') || tl.startsWith('website')) phrases.push('Found on the website.');
+	            else if (tl.startsWith('multi-source')) phrases.push('Seen via multiple sources.');
+	            else if (tl.startsWith('llm-reject')) phrases.push('LLM rejected the candidates.');
+	            else if (tl.startsWith('llm-pick')) phrases.push('LLM had to pick between candidates.');
+	            else if (tl.startsWith('content-mismatch')) phrases.push('Channel content looks unrelated.');
+	            else if (tl.startsWith('content-weak')) phrases.push('Channel content match is weak.');
+	            else if (tl.startsWith('web-fail')) phrases.push('Web validation did not confirm it.');
+	            else if (tl === '404') phrases.push('Channel URL did not load.');
+	            else if (tl.startsWith('api-needed')) phrases.push('Not API-verified.');
+	          }
+	          if (!phrases.length) {
+	            if (s.includes('content-mismatch')) return 'Channel content looks unrelated.';
+	            return 'Needs review.';
+	          }
+	          return phrases.slice(0, 2).join(' ');
+	        }
+
+	        // Duplicate channels among current outputRows.
+	        const counts = new Map();
+	        const names = new Map();
+	        for (const v of outputRows.values()) {
           const url = String(v.youtube_url || '').trim();
           if (!url) continue;
           const key = url.toLowerCase().split('?', 1)[0].replace(/\\/+$/, '');
@@ -969,16 +1068,23 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
           } else {
             lowEl.textContent = 'None so far.';
           }
-        } else {
-          const reasonCounts = new Map();
-          for (const r of lowConfRows) {
-            const src = String(r.source || 'unknown');
-            reasonCounts.set(src, (reasonCounts.get(src) || 0) + 1);
-          }
-          const top = Array.from(reasonCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10);
-          lowEl.innerHTML = top.map(([src, c]) => '<div style=\"margin:4px 0\"><span class=\"pill\">' + c + '</span> <span class=\"mono\">' + esc(src) + '</span></div>').join('');
-        }
-      }
+	        } else {
+	          const reasonCounts = new Map();
+	          for (const r of lowConfRows) {
+	            const src = String(r.source || 'unknown');
+	            reasonCounts.set(src, (reasonCounts.get(src) || 0) + 1);
+	          }
+	          const top = Array.from(reasonCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10);
+	          lowEl.innerHTML = top.map(([src, c]) => {
+	            const explain = lowConfExplain(src);
+	            return '<div style=\"margin:6px 0\">' +
+	              '<span class=\"pill\">' + c + '</span> ' +
+	              '<span class=\"mono\">' + esc(src) + '</span>' +
+	              (explain ? ('<div class=\"k\" style=\"margin-left: 34px\">' + esc(explain) + '</div>') : '') +
+	            '</div>';
+	          }).join('');
+	        }
+	      }
       function renderInspector() {
         const box = document.getElementById('inspectorBox');
         if (!selectedRowKey) {
@@ -1187,15 +1293,21 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         renderInsights();
         renderInspector();
       }
-      document.getElementById('llmModelSelect')?.addEventListener('change', (e) => {
-        const v = String(e?.target?.value || '');
-        const custom = document.getElementById('llmModelCustom');
-        if (!custom) return;
-        custom.style.display = (v === 'custom') ? 'block' : 'none';
-      });
-      fetchInputPreview(); preloadOutputPreview(); renderLowConfTable(); tick(); setInterval(tick, 3000);
-    </script>
-  </body>
+	      document.getElementById('llmModelSelect')?.addEventListener('change', (e) => {
+	        const v = String(e?.target?.value || '');
+	        const custom = document.getElementById('llmModelCustom');
+	        if (!custom) return;
+	        custom.style.display = (v === 'custom') ? 'block' : 'none';
+	      });
+	      document.getElementById('inputBrowse')?.addEventListener('change', (e) => {
+	        const file = e?.target?.files?.[0];
+	        uploadInputCsv(file);
+	        // Reset so picking the same file twice re-triggers change.
+	        try { e.target.value = ''; } catch {}
+	      });
+	      fetchInputPreview(); preloadOutputPreview(); renderLowConfTable(); tick(); setInterval(tick, 3000);
+	    </script>
+	  </body>
 </html>
 """
 
@@ -1320,10 +1432,48 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         return {"events": events, "next_offset": next_offset}
 
     @app.get("/run/input-preview")
-    def run_input_preview(limit: int = 30) -> dict[str, Any]:
+    def run_input_preview(limit: int = 30, path: str | None = None) -> dict[str, Any]:
         state = _read_state(paths)
-        input_path = _state_path(base, state, "input_path", DEFAULT_INPUT)
+        if path:
+            try:
+                input_path = base / _safe_relpath(path)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        else:
+            input_path = _state_path(base, state, "input_path", DEFAULT_INPUT)
         return _input_preview(input_path, limit=max(1, min(limit, 200)))
+
+    @app.post("/run/upload-input")
+    async def run_upload_input(request: Request) -> dict[str, Any]:
+        filename = _safe_upload_filename(request.headers.get("x-filename", "input.csv"))
+        # Keep this permissive; different browsers can send odd content types.
+        _content_type = (request.headers.get("content-type") or "").lower()
+        body = await request.body()
+        max_bytes = 50 * 1024 * 1024
+        if len(body) > max_bytes:
+            raise HTTPException(status_code=413, detail=f"File too large (max {max_bytes} bytes).")
+
+        dest = base / filename
+        # Avoid clobbering an existing file by accident: if it exists, create a unique name.
+        if dest.exists():
+            stem = dest.stem
+            suffix = dest.suffix or ".csv"
+            for i in range(1, 200):
+                candidate = base / f"{stem}.{i}{suffix}"
+                if not candidate.exists():
+                    dest = candidate
+                    filename = dest.name
+                    break
+
+        dest.write_bytes(body)
+
+        # Update state so previews work immediately and the default run input is correct.
+        state = _read_state(paths)
+        state["input_path"] = filename
+        state["planned_total"] = _count_rows(dest)
+        _write_state(paths, state)
+
+        return {"saved_as": filename, "bytes": len(body)}
 
     @app.get("/run/output-preview")
     def run_output_preview(limit: int = 30) -> dict[str, Any]:
