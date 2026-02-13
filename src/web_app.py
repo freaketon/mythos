@@ -829,31 +829,34 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
 	        await fetchInputPreview();
 	        setActivity('Uploaded input CSV: ' + (saved || file.name), false);
 	      }
-      async function preloadOutputPreview() {
-        const r = await fetch('/run/output-preview?limit=200'); const p = await r.json();
-        if (!p.rows || !p.rows.length) {
-          renderOutputTable();
-          return;
-        }
-        const idx = {};
-        p.headers.forEach((h, i) => { idx[h] = i; });
-        for (const row of p.rows) {
-          const rowNumber = row[idx['row_number']] || '';
-          const key = String(rowNumber || outputRows.size + 1);
-          outputRows.set(key, {
-            row_number: rowNumber,
-            name: row[idx['Name']] || '',
-            youtube_handle: row[idx['Youtube handle']] || '',
-            youtube_url: row[idx['Youtube URL']] || '',
-            youtube_subs_count: row[idx['Youtube Subs count']] || '',
-            youtube_status: (row[idx['Youtube URL']] || row[idx['Youtube handle']]) ? 'hit' : '',
-            instagram_handle: row[idx['Instagram handle']] || '',
-            instagram_followers: row[idx['Instagram followers']] || '',
-            instagram_status: (row[idx['Instagram handle']] || row[idx['Instagram followers']]) ? 'hit' : '',
-          });
-        }
-        renderOutputTable();
-      }
+	      async function preloadOutputPreview() {
+	        const r = await fetch('/run/output-preview?limit=200'); const p = await r.json();
+	        if (!p.rows || !p.rows.length) {
+	          renderOutputTable();
+	          return;
+	        }
+	        const idx = {};
+	        p.headers.forEach((h, i) => { idx[h] = i; });
+	        for (const row of p.rows) {
+	          const rowNumber = row[idx['row_number']] || '';
+	          const key = String(rowNumber || outputRows.size + 1);
+	          outputRows.set(key, {
+	            row_number: rowNumber,
+	            name: row[idx['Name']] || '',
+	            youtube_handle: row[idx['Youtube handle']] || '',
+	            youtube_url: row[idx['Youtube URL']] || '',
+	            youtube_subs_count: row[idx['Youtube Subs count']] || '',
+	            youtube_upload_count: row[idx['Youtube Upload count']] || '',
+	            youtube_publishing_cadence: row[idx['Youtube Publishing cadence']] || '',
+	            youtube_channel_age: row[idx['Youtube Channel Age']] || '',
+	            youtube_status: (row[idx['Youtube URL']] || row[idx['Youtube handle']]) ? 'hit' : '',
+	            instagram_handle: row[idx['Instagram handle']] || '',
+	            instagram_followers: row[idx['Instagram followers']] || '',
+	            instagram_status: (row[idx['Instagram handle']] || row[idx['Instagram followers']]) ? 'hit' : '',
+	          });
+	        }
+	        renderOutputTable();
+	      }
       function renderLowConfTable() {
         const headers = ['row_number', 'confidence', 'candidate_handle', 'candidate_url', 'source', 'queries'];
         const rows = lowConfRows
@@ -964,6 +967,8 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
             (Array.isArray(v.youtube_evidence_sources) ? v.youtube_evidence_sources.join(', ') : (v.youtube_evidence_sources || '')),
             (typeof v.youtube_content_affinity === 'number' ? v.youtube_content_affinity.toFixed(2) : (v.youtube_content_affinity || '')),
             v.youtube_subs_count,
+            v.youtube_upload_count || '',
+            v.youtube_publishing_cadence || '',
             v.youtube_status,
             v.instagram_handle,
             v.instagram_followers,
@@ -982,6 +987,8 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
             'youtube_evidence',
             'yt_affinity',
             'youtube_subs',
+            'youtube_uploads',
+            'yt_cadence',
             'youtube_status',
             'instagram_handle',
             'instagram_followers',
@@ -1094,12 +1101,19 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         const v = outputRows.get(String(selectedRowKey));
         const low = lowConfRows.find(r => String(r.row_number || '') === String(selectedRowKey));
         const name = (v && v.name) ? v.name : (low ? ('row ' + low.row_number) : ('row ' + selectedRowKey));
-        const url = v ? (v.youtube_url || '') : '';
-        const handle = v ? (v.youtube_handle || '') : '';
+	        const url = v ? (v.youtube_url || '') : '';
+	        const handle = v ? (v.youtube_handle || '') : '';
 	        const status = v ? (v.youtube_status || '') : '';
 	        const source = v ? (v.youtube_source || '') : (low ? (low.source || '') : '');
 	        const conf = v ? (v.youtube_confidence ?? '') : (low ? (low.confidence || '') : '');
 	        const confWhy = v ? (v.youtube_confidence_reason || '') : '';
+	        const subs = v ? (v.youtube_subs_count || '') : '';
+	        const subsSrc = v ? (v.youtube_subscriber_count_source || '') : '';
+	        const uploads = v ? (v.youtube_upload_count || '') : '';
+	        const uploadsSrc = v ? (v.youtube_upload_count_source || '') : '';
+	        const cadence = v ? (v.youtube_publishing_cadence || '') : '';
+	        const cadenceSrc = v ? (v.youtube_cadence_source || '') : '';
+	        const age = v ? (v.youtube_channel_age || '') : '';
 	        const affinity = v ? v.youtube_content_affinity : null;
 	        const evidence = v && v.youtube_evidence_sources ? (Array.isArray(v.youtube_evidence_sources) ? v.youtube_evidence_sources.join(', ') : String(v.youtube_evidence_sources)) : '';
 	        const queries = v && v.youtube_queries ? (Array.isArray(v.youtube_queries) ? v.youtube_queries.join('\\n') : String(v.youtube_queries)) : (low ? (low.queries || '') : '');
@@ -1116,6 +1130,10 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
 	          '<div class=\"k\">Source</div><div class=\"mono\">' + esc(source) + '</div>' +
 	          '<div class=\"k\">Confidence</div><div class=\"mono\">' + esc(conf) + '</div>' +
 	          '<div class=\"k\">Conf why</div><div class=\"mono\">' + esc(confWhy || '') + '</div>' +
+	          '<div class=\"k\">Subscribers</div><div class=\"mono\">' + esc(subs) + (subsSrc ? (' <span class=\"k\">(' + esc(subsSrc) + ')</span>') : '') + '</div>' +
+	          '<div class=\"k\">Uploads</div><div class=\"mono\">' + esc(uploads) + (uploadsSrc ? (' <span class=\"k\">(' + esc(uploadsSrc) + ')</span>') : '') + '</div>' +
+	          '<div class=\"k\">Cadence</div><div class=\"mono\">' + esc(cadence) + (cadenceSrc ? (' <span class=\"k\">(' + esc(cadenceSrc) + ')</span>') : '') + '</div>' +
+	          '<div class=\"k\">Channel age</div><div class=\"mono\">' + esc(age) + '</div>' +
 	          '<div class=\"k\">Evidence</div><div class=\"mono\">' + esc(evidence) + '</div>' +
 	          '<div class=\"k\">Content affinity</div><div class=\"mono\">' + esc((typeof affinity === 'number') ? affinity.toFixed(2) : (affinity || '')) + '</div>' +
 	          '</div>' +
@@ -1162,10 +1180,16 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
             existing.youtube_handle = e.youtube_handle || existing.youtube_handle;
             existing.youtube_url = e.youtube_url || existing.youtube_url;
             existing.youtube_subs_count = e.youtube_subs_count || existing.youtube_subs_count;
+            existing.youtube_upload_count = e.youtube_upload_count || existing.youtube_upload_count;
+            existing.youtube_publishing_cadence = e.youtube_publishing_cadence || existing.youtube_publishing_cadence;
+            existing.youtube_channel_age = e.youtube_channel_age || existing.youtube_channel_age;
             existing.youtube_status = e.status || existing.youtube_status;
             existing.youtube_source = e.youtube_source || e.method || existing.youtube_source;
             existing.youtube_confidence = e.youtube_confidence ?? existing.youtube_confidence;
             existing.youtube_confidence_reason = e.youtube_confidence_reason ?? existing.youtube_confidence_reason;
+            existing.youtube_subscriber_count_source = e.youtube_subscriber_count_source ?? existing.youtube_subscriber_count_source;
+            existing.youtube_upload_count_source = e.youtube_upload_count_source ?? existing.youtube_upload_count_source;
+            existing.youtube_cadence_source = e.youtube_cadence_source ?? existing.youtube_cadence_source;
             existing.youtube_evidence_sources = e.youtube_evidence_sources || existing.youtube_evidence_sources;
             existing.youtube_content_affinity = e.youtube_content_affinity ?? existing.youtube_content_affinity;
             existing.youtube_recent_titles = e.youtube_recent_video_titles || existing.youtube_recent_titles;

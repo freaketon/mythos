@@ -26,7 +26,7 @@ def test_skill_copies_csv_end_to_end(tmp_path: Path, monkeypatch) -> None:
     assert output_csv.exists()
     assert output_csv.read_text(encoding="utf-8") == (
         "Name,Email,Youtube handle,Youtube URL,Youtube Subs count,"
-        "Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
+        "Youtube Upload count,Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
         "Instagram followers,Instagram publishing cadence,Instagram Account Age\n"
-        "Alice,alice@example.com,,,,,,,,,\n"
+        "Alice,alice@example.com,,,,,,,,,,\n"
     )

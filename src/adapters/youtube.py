@@ -23,6 +23,8 @@ LOGGER = logging.getLogger(__name__)
 _INVALID_YOUTUBE_API_KEYS: set[str] = set()
 _WEBSITE_YOUTUBE_CACHE: dict[str, list[str]] = {}
 _CHANNEL_TITLES_CACHE: dict[str, list[str]] = {}
+_CHANNEL_METRICS_CACHE: dict[str, dict[str, int]] = {}
+_CHANNEL_RSS_DAYS_CACHE: dict[str, list[int]] = {}
 
 _RELATIVE_TIME_PATTERN = re.compile(
     r"(?P<value>\d+)\s+(?P<unit>day|week|month|year)s?\s+ago",
@@ -63,7 +65,11 @@ class YouTubeChannelData(BaseModel):
     handle: str | None = None
     url: str | None = None
     subscriber_count: int | None = None
+    subscriber_count_source: str | None = None
+    upload_count: int | None = None
+    upload_count_source: str | None = None
     publishing_cadence: str | None = None
+    publishing_cadence_source: str | None = None
     channel_age: str | None = None
     source_url: str | None = None
     confidence: int | None = None
@@ -122,6 +128,7 @@ class YouTubeCandidate:
     subscriber_count: int | None
     channel_id: str | None
     source: str
+    upload_count: int | None = None
     published_at: str | None = None
     uploads_playlist_id: str | None = None
 
@@ -463,11 +470,132 @@ def _youtube_url_exists(url: str, *, timeout: float = 6.0) -> bool:
     return True
 
 
+def _channel_metrics_from_html(url: str, *, timeout: float = 6.0) -> dict[str, int]:
+    normalized = _normalize_url(url) or url
+    if not normalized:
+        return {}
+    cached = _CHANNEL_METRICS_CACHE.get(normalized)
+    if cached is not None:
+        return dict(cached)
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            resp = client.get(normalized, headers={"User-Agent": "Mozilla/5.0"})
+    except Exception:
+        _CHANNEL_METRICS_CACHE[normalized] = {}
+        return {}
+    if resp.status_code >= 400:
+        _CHANNEL_METRICS_CACHE[normalized] = {}
+        return {}
+    html = resp.text or ""
+    subs_text = None
+    videos_text = None
+    # Common shapes found in ytInitialData:
+    # - "subscriberCountText":{"simpleText":"123K subscribers"}
+    # - "subscriberCountText":{"accessibility":{"accessibilityData":{"label":"123K subscribers"}}}
+    m = re.search(r'"subscriberCountText"\s*:\s*\{.*?"simpleText"\s*:\s*"([^"]+)"', html, re.DOTALL)
+    if m:
+        subs_text = m.group(1)
+    if not subs_text:
+        m = re.search(r'"subscriberCountText"\s*:\s*\{.*?"label"\s*:\s*"([^"]+)"', html, re.DOTALL)
+        if m:
+            subs_text = m.group(1)
+    m = re.search(r'"videoCountText"\s*:\s*\{.*?"simpleText"\s*:\s*"([^"]+)"', html, re.DOTALL)
+    if m:
+        videos_text = m.group(1)
+    if not videos_text:
+        m = re.search(r'"videoCountText"\s*:\s*\{.*?"label"\s*:\s*"([^"]+)"', html, re.DOTALL)
+        if m:
+            videos_text = m.group(1)
+
+    subscriber_count = _parse_subscriber_count(subs_text)
+    upload_count = _parse_compact_count(videos_text)
+    out: dict[str, int] = {}
+    if isinstance(subscriber_count, int) and subscriber_count >= 0:
+        out["subscriber_count"] = subscriber_count
+    if isinstance(upload_count, int) and upload_count >= 0:
+        out["upload_count"] = upload_count
+    _CHANNEL_METRICS_CACHE[normalized] = dict(out)
+    return out
+
+
+def _youtube_rss_published_days(channel_id: str, *, timeout: float = 6.0) -> list[int]:
+    channel_id = (channel_id or "").strip()
+    if not channel_id:
+        return []
+    cached = _CHANNEL_RSS_DAYS_CACHE.get(channel_id)
+    if cached is not None:
+        return list(cached)
+    url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            resp = client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+    except Exception:
+        _CHANNEL_RSS_DAYS_CACHE[channel_id] = []
+        return []
+    if resp.status_code >= 400:
+        _CHANNEL_RSS_DAYS_CACHE[channel_id] = []
+        return []
+    xml_text = resp.text or ""
+    try:
+        import xml.etree.ElementTree as ET
+
+        root = ET.fromstring(xml_text)
+    except Exception:
+        _CHANNEL_RSS_DAYS_CACHE[channel_id] = []
+        return []
+    now = datetime.now(timezone.utc)
+    days: list[int] = []
+    # Namespace is usually Atom; ignore it and match by suffix.
+    for elem in root.iter():
+        tag = elem.tag.rsplit("}", 1)[-1]
+        if tag != "published":
+            continue
+        if not elem.text:
+            continue
+        raw = elem.text.strip()
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        days.append(max(0, (now - dt).days))
+    days = sorted(set(days))[:25]
+    _CHANNEL_RSS_DAYS_CACHE[channel_id] = list(days)
+    return days
+
+
 def _parse_subscriber_count(text: str | dict[str, object] | None) -> int | None:
     normalized_text = _extract_text(text)
     if not normalized_text:
         return None
     match = _SUBSCRIBER_PATTERN.search(normalized_text.replace("subscribers", ""))
+    if not match:
+        return None
+    value = match.group("count").replace(",", "")
+    unit = (match.group("unit") or "").upper()
+    try:
+        numeric = float(value)
+    except ValueError:
+        return None
+    multiplier = {"": 1, "K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(unit, 1)
+    return int(numeric * multiplier)
+
+
+def _parse_compact_count(text: str | None) -> int | None:
+    """
+    Parse counts like "1.2K videos" or "123 videos" into an int.
+    """
+    if not text:
+        return None
+    normalized = (
+        text.replace("videos", "")
+        .replace("video", "")
+        .replace("subscribers", "")
+        .replace("subscriber", "")
+        .strip()
+    )
+    match = _SUBSCRIBER_PATTERN.search(normalized.replace(",", ""))
     if not match:
         return None
     value = match.group("count").replace(",", "")
@@ -1121,6 +1249,8 @@ def _youtube_api_channel_candidate(channel_id: str, source: str, config: YouTube
         return None
     subs_raw = statistics.get("subscriberCount")
     subscriber_count = int(subs_raw) if isinstance(subs_raw, str) and subs_raw.isdigit() else None
+    video_raw = statistics.get("videoCount")
+    upload_count = int(video_raw) if isinstance(video_raw, str) and video_raw.isdigit() else None
     published_at = snippet.get("publishedAt") if isinstance(snippet.get("publishedAt"), str) else None
     title = snippet.get("title") if isinstance(snippet.get("title"), str) else None
     return YouTubeCandidate(
@@ -1128,6 +1258,7 @@ def _youtube_api_channel_candidate(channel_id: str, source: str, config: YouTube
         handle=handle,
         url=url,
         subscriber_count=subscriber_count,
+        upload_count=upload_count,
         channel_id=channel_id,
         published_at=published_at,
         uploads_playlist_id=uploads_playlist_id,
@@ -1323,9 +1454,12 @@ def _build_candidate_from_yt_search(result: dict[str, object]) -> YouTubeCandida
     channel_id = str(result.get("id") or "")
     link = str(result.get("link") or "") or None
     handle = None
+    subscriber_count = None
     subscribers_field = result.get("subscribers")
     if isinstance(subscribers_field, str) and subscribers_field.strip().startswith("@"):
         handle = _normalize_handle(subscribers_field.strip())
+    elif isinstance(subscribers_field, str):
+        subscriber_count = _parse_subscriber_count(subscribers_field)
     if link and "/@" in link:
         handle = _normalize_handle(link.split("/@")[-1].split("/")[0])
     url = link or _build_channel_url(channel_id, handle)
@@ -1336,7 +1470,7 @@ def _build_candidate_from_yt_search(result: dict[str, object]) -> YouTubeCandida
         title=title or None,
         handle=handle,
         url=url,
-        subscriber_count=None,
+        subscriber_count=subscriber_count,
         channel_id=channel_id or None,
         published_at=None,
         uploads_playlist_id=None,
@@ -1854,11 +1988,11 @@ def _enrich_candidate_with_youtube_api(
                 lambda: client.get(
                     "https://www.googleapis.com/youtube/v3/channels",
                     params={
-                        "part": "snippet,statistics",
-                        "id": channel_id,
-                        "key": api_key,
-                    },
-                ),
+                    "part": "snippet,statistics,contentDetails",
+                    "id": channel_id,
+                    "key": api_key,
+                },
+            ),
                 attempts=config.retry_attempts,
                 backoff=config.retry_backoff,
             )
@@ -1888,6 +2022,10 @@ def _enrich_candidate_with_youtube_api(
             api_subscribers = (
                 int(subs_raw) if isinstance(subs_raw, str) and subs_raw.isdigit() else candidate.subscriber_count
             )
+            video_raw = statistics.get("videoCount")
+            api_uploads = (
+                int(video_raw) if isinstance(video_raw, str) and video_raw.isdigit() else candidate.upload_count
+            )
             content_details = item.get("contentDetails", {}) if isinstance(item.get("contentDetails"), dict) else {}
             related_playlists = (
                 content_details.get("relatedPlaylists", {})
@@ -1904,6 +2042,7 @@ def _enrich_candidate_with_youtube_api(
                 handle=api_handle,
                 url=api_url,
                 subscriber_count=api_subscribers,
+                upload_count=api_uploads,
                 channel_id=api_channel_id,
                 source=f"{candidate.source}+youtube-api",
                 published_at=snippet.get("publishedAt") if isinstance(snippet.get("publishedAt"), str) else candidate.published_at,
@@ -2237,8 +2376,32 @@ def find_best_youtube_channel(
             return None
         return ", ".join(tags[:5])
 
+    # Best-effort metrics enrichment:
+    # - Prefer API when present
+    # - Else attempt channel HTML parsing (fast, no API key)
+    # - Else fall back to whatever the candidate source provided.
+    subscriber_count = best.subscriber_count
+    subscriber_count_source = None
+    if isinstance(subscriber_count, int):
+        subscriber_count_source = "youtube-api" if "youtube-api" in best.source else best.source.split("+", 1)[0]
+    upload_count = best.upload_count
+    upload_count_source = None
+    if isinstance(upload_count, int):
+        upload_count_source = "youtube-api" if "youtube-api" in best.source else best.source.split("+", 1)[0]
+    if accepted and config.web_validation and best.url:
+        metrics = _channel_metrics_from_html(best.url)
+        if subscriber_count_source != "youtube-api":
+            html_subs = metrics.get("subscriber_count")
+            if isinstance(html_subs, int) and html_subs >= 0:
+                subscriber_count = html_subs
+                subscriber_count_source = "channel-html"
+        if upload_count_source != "youtube-api":
+            html_uploads = metrics.get("upload_count")
+            if isinstance(html_uploads, int) and html_uploads >= 0:
+                upload_count = html_uploads
+                upload_count_source = "channel-html"
+
     if not accepted:
-        api_active = _youtube_api_key(config) is not None
         recent_titles = None
         # For UI/auditing: include a small content sample for borderline/rejected candidates
         # when we already had enough signal to compute affinity.
@@ -2247,7 +2410,10 @@ def find_best_youtube_channel(
         return YouTubeChannelData(
             handle=best.handle,
             url=best.url,
-            subscriber_count=best.subscriber_count if api_active and "youtube-api" in best.source else None,
+            subscriber_count=subscriber_count,
+            subscriber_count_source=subscriber_count_source,
+            upload_count=upload_count,
+            upload_count_source=upload_count_source,
             source_url=best.url,
             confidence=best_score,
             confidence_reason=_confidence_reason(),
@@ -2261,6 +2427,7 @@ def find_best_youtube_channel(
     LOGGER.info("YouTube source channel: %s", best.url)
 
     publishing_cadence = None
+    publishing_cadence_source = None
     channel_age = _age_from_published_at(best.published_at)
 
     days_list: list[int] = []
@@ -2284,12 +2451,26 @@ def find_best_youtube_channel(
             if days is not None
         ]
         publishing_cadence = _cadence_from_days(days_list)
+        if publishing_cadence:
+            publishing_cadence_source = "scrapetube"
     except Exception:
         LOGGER.warning("Failed to fetch YouTube videos for %s", best.url)
 
     if publishing_cadence is None and best.uploads_playlist_id and _youtube_api_key(config):
         # Cheap and stable cadence signal.
         publishing_cadence = _youtube_api_uploads_cadence(best.uploads_playlist_id, config)
+        if publishing_cadence:
+            publishing_cadence_source = "youtube-api"
+
+    if publishing_cadence is None and config.web_validation:
+        channel_id = best.channel_id or _extract_channel_id_from_url(best.url)
+        if not channel_id and best.url:
+            channel_id = _yt_dlp_resolve_channel_id(best.url, config)
+        if channel_id:
+            days = _youtube_rss_published_days(channel_id)
+            publishing_cadence = _cadence_from_days(days)
+            if publishing_cadence:
+                publishing_cadence_source = "rss"
 
     if channel_age is None:
         try:
@@ -2317,7 +2498,6 @@ def find_best_youtube_channel(
             oldest_days = max(days_list)
         channel_age = _age_from_days(oldest_days)
 
-    api_active = _youtube_api_key(config) is not None
     recent_titles = None
     # Only fetch content samples when we have a reason to believe they'll be useful.
     if config.llm_rerank or best_affinity is not None:
@@ -2325,8 +2505,12 @@ def find_best_youtube_channel(
     return YouTubeChannelData(
         handle=best.handle,
         url=best.url,
-        subscriber_count=best.subscriber_count if api_active and "youtube-api" in best.source else None,
+        subscriber_count=subscriber_count,
+        subscriber_count_source=subscriber_count_source,
+        upload_count=upload_count,
+        upload_count_source=upload_count_source,
         publishing_cadence=publishing_cadence,
+        publishing_cadence_source=publishing_cadence_source,
         channel_age=channel_age,
         source_url=best.url,
         confidence=best_score,

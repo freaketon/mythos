@@ -36,6 +36,7 @@ YOUTUBE_HYDRATED_FIELDS = [
     "Youtube handle",
     "Youtube URL",
     "Youtube Subs count",
+    "Youtube Upload count",
     "Youtube Publishing cadence",
     "Youtube Channel Age",
 ]
@@ -397,7 +398,7 @@ def copy_csv_rows(
                     },
                 )
 
-                youtube_values = ["", "", "", "", ""]
+                youtube_values = ["", "", "", "", "", ""]
                 youtube_status = "disabled"
                 if youtube_lookup:
                     hint_handle, hint_url = _extract_youtube_hint(headers, row)
@@ -511,9 +512,8 @@ def copy_csv_rows(
                                 youtube_values = [
                                     resolved_handle or "",
                                     resolved_url or "",
-                                    str(result.subscriber_count)
-                                    if result.subscriber_count is not None
-                                    else "",
+                                    str(result.subscriber_count) if result.subscriber_count is not None else "",
+                                    str(result.upload_count) if result.upload_count is not None else "",
                                     result.publishing_cadence or "",
                                     result.channel_age or "",
                                 ]
@@ -527,9 +527,10 @@ def copy_csv_rows(
                                 youtube_values = [
                                     hint_handle or result.handle or "",
                                     hint_url or result.url or "",
-                                    "",
-                                    "",
-                                    "",
+                                    str(result.subscriber_count) if result.subscriber_count is not None else "",
+                                    str(result.upload_count) if result.upload_count is not None else "",
+                                    result.publishing_cadence or "",
+                                    result.channel_age or "",
                                 ]
                                 report.hydrated_youtube_rows += 1
                                 LOGGER.info("YouTube HIT row=%s source=hint", line_number)
@@ -568,6 +569,7 @@ def copy_csv_rows(
                                     "",
                                     "",
                                     "",
+                                    "",
                                 ]
                                 report.hydrated_youtube_rows += 1
                                 LOGGER.info(
@@ -592,11 +594,15 @@ def copy_csv_rows(
                                 "youtube_handle": youtube_values[0],
                                 "youtube_url": youtube_values[1],
                                 "youtube_subs_count": youtube_values[2],
-                                "youtube_publishing_cadence": youtube_values[3],
-                                "youtube_channel_age": youtube_values[4],
+                                "youtube_upload_count": youtube_values[3],
+                                "youtube_publishing_cadence": youtube_values[4],
+                                "youtube_channel_age": youtube_values[5],
                                 "youtube_source": result.source if result else None,
                                 "youtube_confidence": result.confidence if result else None,
                                 "youtube_confidence_reason": result.confidence_reason if result else None,
+                                "youtube_subscriber_count_source": result.subscriber_count_source if result else None,
+                                "youtube_upload_count_source": result.upload_count_source if result else None,
+                                "youtube_cadence_source": result.publishing_cadence_source if result else None,
                                 "youtube_evidence_sources": result.evidence_sources if result else None,
                                 "youtube_content_affinity": result.content_affinity if result else None,
                                 "youtube_recent_video_titles": result.recent_video_titles if result else None,
@@ -619,11 +625,15 @@ def copy_csv_rows(
                                 "youtube_handle": youtube_values[0],
                                 "youtube_url": youtube_values[1],
                                 "youtube_subs_count": youtube_values[2],
-                                "youtube_publishing_cadence": youtube_values[3],
-                                "youtube_channel_age": youtube_values[4],
+                                "youtube_upload_count": youtube_values[3],
+                                "youtube_publishing_cadence": youtube_values[4],
+                                "youtube_channel_age": youtube_values[5],
                                 "youtube_source": None,
                                 "youtube_confidence": None,
                                 "youtube_confidence_reason": None,
+                                "youtube_subscriber_count_source": None,
+                                "youtube_upload_count_source": None,
+                                "youtube_cadence_source": None,
                                 "youtube_evidence_sources": None,
                                 "youtube_content_affinity": None,
                                 "youtube_recent_video_titles": None,
@@ -722,8 +732,9 @@ def copy_csv_rows(
                         "youtube_handle": youtube_values[0],
                         "youtube_url": youtube_values[1],
                         "youtube_subs_count": youtube_values[2],
-                        "youtube_publishing_cadence": youtube_values[3],
-                        "youtube_channel_age": youtube_values[4],
+                        "youtube_upload_count": youtube_values[3],
+                        "youtube_publishing_cadence": youtube_values[4],
+                        "youtube_channel_age": youtube_values[5],
                         "instagram_handle": instagram_values[0],
                         "instagram_followers": instagram_values[1],
                         "instagram_publishing_cadence": instagram_values[2],

@@ -67,8 +67,8 @@ def test_find_youtube_channel_integration(monkeypatch) -> None:
     assert isinstance(result, YouTubeChannelData)
     assert result.handle == "@MrBeast"
     assert result.url == "https://www.youtube.com/@MrBeast"
-    # Subscriber count is only filled when API-verified.
-    assert result.subscriber_count is None
+    assert result.subscriber_count == 100_000_000
+    assert result.subscriber_count_source == "scrapetube"
     assert result.publishing_cadence == "Weekly or more"
     assert result.channel_age == "10 years"
 
