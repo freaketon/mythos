@@ -22,9 +22,19 @@ def test_candidate_handles_extracts_unique_tokens() -> None:
     assert handles == ["alice.co"]
 
 
+def test_candidate_handles_extracts_keyword_style_handle() -> None:
+    handles = _candidate_handles("instagram handle: gbs.arbeitsschutz")
+    assert handles == ["gbs.arbeitsschutz"]
+
+
 def test_candidate_handles_ignores_generic_tokens() -> None:
     handles = _candidate_handles("Alice Company example.com")
     assert handles == []
+
+
+def test_candidate_handles_does_not_extract_dot_com_from_instagram_domain() -> None:
+    handles = _candidate_handles("Find me at instagram.com https://www.instagram.com/example_handle/")
+    assert handles == ["example_handle"]
 
 
 def test_compute_cadence_from_dates() -> None:

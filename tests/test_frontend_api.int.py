@@ -7,6 +7,7 @@ import sys
 from fastapi.testclient import TestClient
 import pytest
 
+import src.web_app as web_app
 from src.web_app import create_app
 
 
@@ -137,6 +138,34 @@ def test_output_preview_reads_hydrated_csv(tmp_path: Path) -> None:
     assert payload["rows"] == [["c", "d"]]
 
 
+def test_low_confidence_preview_pages_rows(tmp_path: Path) -> None:
+    low_conf = tmp_path / "low.csv"
+    low_conf.write_text(
+        "row_number,queries,candidate_url,candidate_handle,confidence,source\n"
+        "2,a | b,https://example.com/@a,a,40,ddg\n"
+        "3,c,https://example.com/@c,c,10,serper\n",
+        encoding="utf-8",
+    )
+    state = tmp_path / "run.state.json"
+    state.write_text(json.dumps({"low_confidence_path": "low.csv"}), encoding="utf-8")
+
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    page1 = client.get("/run/low-confidence-preview?offset=0&limit=1")
+    assert page1.status_code == 200
+    payload1 = page1.json()
+    assert payload1["headers"][0] == "row_number"
+    assert payload1["rows"] == [["2", "a | b", "https://example.com/@a", "a", "40", "ddg"]]
+    assert payload1["next_offset"] == 1
+
+    page2 = client.get(f"/run/low-confidence-preview?offset={payload1['next_offset']}&limit=10")
+    assert page2.status_code == 200
+    payload2 = page2.json()
+    assert payload2["rows"] == [["3", "c", "https://example.com/@c", "c", "10", "serper"]]
+    assert payload2["next_offset"] == 2
+
+
 def test_run_start_returns_409_when_artifact_unlink_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     output = tmp_path / "MVI - Elite Outreach List & Tracker - Master List - Elite - Intake - 3009 - 11_16_2025.hydrated.full.csv"
     output.write_text("a,b\n", encoding="utf-8")
@@ -184,6 +213,8 @@ def test_run_start_uses_current_python_interpreter(tmp_path: Path, monkeypatch: 
             "low_confidence_path": "low.csv",
             "checkpoint_every": 1,
             "limit": 1,
+            "llm_rerank": True,
+            "llm_model": "gpt-4o-mini",
         },
     )
 
@@ -192,6 +223,7 @@ def test_run_start_uses_current_python_interpreter(tmp_path: Path, monkeypatch: 
     assert isinstance(cmd, list)
     assert cmd[0] == sys.executable
     assert cmd[1:4] == ["-u", "-m", "src.main"]
+    assert "--llm-rerank" in cmd
     assert captured["start_new_session"] is True
     assert captured["close_fds"] is True
 
@@ -234,3 +266,66 @@ def test_run_start_keeps_web_endpoints_responsive(tmp_path: Path, monkeypatch: p
     # Regression guard: app process remains responsive after starting a run.
     preview_response = client.get("/run/input-preview?limit=5")
     assert preview_response.status_code == 200
+
+
+def test_run_stop_marks_state_stopping_and_signals_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state_file = tmp_path / "run.state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "pid": 42424,
+                "started_at": "2026-02-12T00:00:00+00:00",
+                "command": ["python", "-m", "src.main"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, int] = {}
+
+    def fake_killpg(pid: int, sig: int) -> None:
+        captured["pid"] = pid
+        captured["sig"] = sig
+
+    monkeypatch.setattr("src.web_app._is_pid_alive", lambda pid: bool(pid))
+    monkeypatch.setattr("src.web_app.os.killpg", fake_killpg, raising=False)
+
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    stop_response = client.post("/run/stop")
+    assert stop_response.status_code == 200
+    assert stop_response.json()["state"] == "stopping"
+    assert captured["pid"] == 42424
+
+    status_response = client.get("/run/status")
+    assert status_response.status_code == 200
+    assert status_response.json()["state"] == "stopping"
+
+    persisted_state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert "stop_requested_at" in persisted_state
+
+
+def test_run_stop_returns_idle_when_process_is_not_alive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state_file = tmp_path / "run.state.json"
+    state_file.write_text(json.dumps({"pid": 51515}), encoding="utf-8")
+    monkeypatch.setattr("src.web_app._is_pid_alive", lambda pid: False)
+
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    response = client.post("/run/stop")
+    assert response.status_code == 200
+    assert response.json() == {"state": "idle", "stopped": False}
+
+
+def test_is_pid_alive_treats_zombie_as_not_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(web_app.os, "kill", lambda *_args, **_kwargs: None)
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stdout = "Z\n"
+
+    monkeypatch.setattr(web_app.subprocess, "run", lambda *_args, **_kwargs: FakeCompletedProcess())
+
+    assert web_app._is_pid_alive(99999) is False

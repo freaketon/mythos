@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
+.run-venv/
 tmp_test/
 sample.hydrated.csv
 MVI - Elite Outreach List & Tracker - Master List - Elite - Intake - 3009 - 11_16_2025.csv
@@ -10,5 +11,9 @@ run*.jsonl
 run.state.json
 *.hydrated.full.csv
 *.low-confidence.full.csv
+.coverage
+htmlcov/
 .agent/notes.md
 .agent/scratchpad.md
+.env
+.env.local

@@ -23,6 +23,14 @@ _YOUTUBE_URL_PATTERN = re.compile(
     r"(https?://(?:www\.)?(?:youtube\.com/[^\s]+|youtu\.be/[^\s]+))",
     re.IGNORECASE,
 )
+_INSTAGRAM_HANDLE_PATTERN = re.compile(
+    r"(?:instagram\.com/|@)([A-Za-z0-9._]{3,30})",
+    re.IGNORECASE,
+)
+_INSTAGRAM_URL_PATTERN = re.compile(
+    r"(https?://(?:www\.)?instagram\.com/[A-Za-z0-9._]{3,30})",
+    re.IGNORECASE,
+)
 
 YOUTUBE_HYDRATED_FIELDS = [
     "Youtube handle",
@@ -117,6 +125,7 @@ def _build_youtube_query(headers: list[str], row: list[str]) -> str | None:
 
 def _build_instagram_query(headers: list[str], row: list[str]) -> str | None:
     base_query = _build_youtube_query(headers, row)
+    hint_handle, hint_url = _extract_instagram_hint(headers, row)
     other = _first_value(headers, row, "Other")
     company_url = _first_value(headers, row, "Company URL")
     bio = _first_value(
@@ -124,7 +133,12 @@ def _build_instagram_query(headers: list[str], row: list[str]) -> str | None:
         row,
         "What's your Twitter bio? (Describe who you help and how you help them in 3 sentences or less).",
     )
-    parts = [base_query or "", other, company_url, bio]
+    hint_fragment = ""
+    if hint_url:
+        hint_fragment = hint_url
+    elif hint_handle:
+        hint_fragment = f"instagram {hint_handle}"
+    parts = [hint_fragment, base_query or "", other, company_url, bio]
     query = " ".join(part.strip() for part in parts if part and part.strip())
     return query or None
 
@@ -140,6 +154,15 @@ def _build_youtube_queries(headers: list[str], row: list[str]) -> list[str]:
     company = _first_value(headers, row, "Company")
     company_url = _first_value(headers, row, "Company URL")
     domain = _domain_from_url(company_url)
+    email = ""
+    for value in row:
+        if "@" in value and " " not in value:
+            email = value.strip()
+            break
+    email_domain = ""
+    email_local = ""
+    if "@" in email:
+        email_local, email_domain = (part.strip() for part in email.split("@", 1))
 
     queries: list[str] = []
     for value in [hint_handle, hint_url]:
@@ -151,6 +174,10 @@ def _build_youtube_queries(headers: list[str], row: list[str]) -> list[str]:
         queries.append(f"{company} YouTube")
     if domain:
         queries.append(f"{domain} YouTube")
+    if email_domain:
+        queries.append(f"{email_domain} YouTube")
+    if email_local and len(email_local) >= 4:
+        queries.append(f"{email_local} YouTube")
     if base_query:
         queries.append(base_query)
 
@@ -198,6 +225,41 @@ def _extract_youtube_hint(headers: list[str], row: list[str]) -> tuple[str | Non
     return handle, channel_url
 
 
+def _extract_instagram_hint(headers: list[str], row: list[str]) -> tuple[str | None, str | None]:
+    values = [value.strip() for value in row if value.strip()]
+    values.extend(
+        [
+            _first_value(headers, row, "Company URL"),
+            _first_value(headers, row, "Other"),
+            _first_value(
+                headers,
+                row,
+                "What's your Twitter bio? (Describe who you help and how you help them in 3 sentences or less).",
+            ),
+        ]
+    )
+
+    handle = None
+    profile_url = None
+    for value in values:
+        lower = value.lower()
+        is_candidate = "instagram.com" in lower or value.strip().startswith("@") or "instagram" in lower
+        if not is_candidate:
+            continue
+
+        handle_match = _INSTAGRAM_HANDLE_PATTERN.search(value)
+        if handle_match:
+            handle = handle_match.group(1).lower()
+
+        url_match = _INSTAGRAM_URL_PATTERN.search(value)
+        if url_match:
+            profile_url = url_match.group(1).rstrip(").,")
+
+        if handle or profile_url:
+            break
+    return handle, profile_url
+
+
 def _count_data_rows(input_path: Path) -> int:
     with input_path.open("r", encoding="utf-8", newline="") as input_file:
         reader = csv.reader(input_file)
@@ -226,6 +288,9 @@ def copy_csv_rows(
     events_path: Path | None = None,
 ) -> ValidationReport:
     report = ValidationReport()
+    seen_youtube_domains: dict[str, set[str]] = {}
+    seen_youtube_name_tokens: dict[str, set[str]] = {}
+    seen_youtube_hits: dict[str, int] = {}
     rows_since_checkpoint = 0
     total_rows_planned = _count_data_rows(input_path)
     if row_limit is not None:
@@ -351,46 +416,146 @@ def copy_csv_rows(
                         )
                         result = youtube_lookup(queries)
                         if result and result.accepted:
-                            resolved_handle = result.handle or hint_handle
-                            resolved_url = result.url or hint_url
-                            youtube_values = [
-                                resolved_handle or "",
-                                resolved_url or "",
-                                str(result.subscriber_count)
-                                if result.subscriber_count is not None
-                                else "",
-                                result.publishing_cadence or "",
-                                result.channel_age or "",
-                            ]
-                            report.hydrated_youtube_rows += 1
-                            source = result.source_url or resolved_url
-                            if source:
-                                LOGGER.info("YouTube HIT row=%s source=%s", line_number, source)
-                            youtube_status = "hit"
-                        elif result and not result.accepted:
-                            issue = LowConfidenceIssue(
-                                row_number=line_number,
-                                queries=queries,
-                                candidate_url=result.url,
-                                candidate_handle=result.handle,
-                                confidence=result.confidence,
-                                source=result.source,
+                            yt_url_norm = (result.url or "").strip().lower().split("?", 1)[0].rstrip("/")
+                            email_domain = ""
+                            for value in row:
+                                value = value.strip()
+                                if "@" in value and " " not in value:
+                                    email_domain = value.split("@", 1)[-1].lower()
+                                    break
+                            company_domain = _domain_from_url(_first_value(headers, row, "Company URL")).lower()
+                            free_email_domains = {
+                                "gmail.com",
+                                "googlemail.com",
+                                "yahoo.com",
+                                "hotmail.com",
+                                "outlook.com",
+                                "icloud.com",
+                                "me.com",
+                                "aol.com",
+                                "proton.me",
+                                "protonmail.com",
+                                "pm.me",
+                            }
+                            domains = {
+                                d
+                                for d in (email_domain, company_domain)
+                                if d and d not in free_email_domains
+                            }
+                            prev_domains = seen_youtube_domains.get(yt_url_norm)
+                            prev_name_tokens = seen_youtube_name_tokens.get(yt_url_norm, set())
+                            prev_hits = seen_youtube_hits.get(yt_url_norm, 0)
+                            strong_source = (result.source or "").startswith(("hint", "website")) or bool(
+                                hint_handle or hint_url
                             )
-                            report.low_confidence_rows.append(issue)
-                            if low_confidence_writer is not None:
-                                low_confidence_writer.writerow(
-                                    [
-                                        issue.row_number,
-                                        " | ".join(issue.queries),
-                                        issue.candidate_url or "",
-                                        issue.candidate_handle or "",
-                                        issue.confidence
-                                        if issue.confidence is not None
-                                        else "",
-                                        issue.source or "",
-                                    ]
+                            # Duplicate-guard:
+                            # - Domain-based: if the same channel is being assigned across disjoint domains, downgrade.
+                            # - Name-based: when we have no domain signals, only start downgrading after the channel
+                            #   is already "popular" (assigned multiple times) and the names don't overlap at all.
+                            name_tokens: set[str] = set()
+                            if row_name:
+                                name_tokens = {
+                                    t
+                                    for t in re.split(r"[^a-z0-9]+", row_name.lower())
+                                    if len(t) >= 3
+                                }
+                            name_based_suspicious = (
+                                yt_url_norm
+                                and prev_hits >= 2
+                                and not domains
+                                and name_tokens
+                                and prev_name_tokens
+                                and name_tokens.isdisjoint(prev_name_tokens)
+                            )
+                            domain_based_suspicious = (
+                                yt_url_norm
+                                and prev_domains is not None
+                                and domains
+                                and prev_domains
+                                and prev_domains.isdisjoint(domains)
+                            )
+                            if yt_url_norm and not strong_source and (domain_based_suspicious or name_based_suspicious):
+                                issue = LowConfidenceIssue(
+                                    row_number=line_number,
+                                    queries=queries,
+                                    candidate_url=result.url,
+                                    candidate_handle=result.handle,
+                                    confidence=result.confidence,
+                                    source="duplicate-guard",
                                 )
-                            youtube_status = "low_confidence"
+                                report.low_confidence_rows.append(issue)
+                                if low_confidence_writer is not None:
+                                    low_confidence_writer.writerow(
+                                        [
+                                            issue.row_number,
+                                            " | ".join(issue.queries),
+                                            issue.candidate_url or "",
+                                            issue.candidate_handle or "",
+                                            issue.confidence if issue.confidence is not None else "",
+                                            issue.source or "",
+                                        ]
+                                    )
+                                youtube_status = "low_confidence"
+                            else:
+                                if yt_url_norm and domains:
+                                    seen_youtube_domains[yt_url_norm] = set(prev_domains or set()) | domains
+                                if yt_url_norm and name_tokens:
+                                    seen_youtube_name_tokens[yt_url_norm] = set(prev_name_tokens or set()) | name_tokens
+                                if yt_url_norm:
+                                    seen_youtube_hits[yt_url_norm] = prev_hits + 1
+
+                                resolved_handle = result.handle or hint_handle
+                                resolved_url = result.url or hint_url
+                                youtube_values = [
+                                    resolved_handle or "",
+                                    resolved_url or "",
+                                    str(result.subscriber_count)
+                                    if result.subscriber_count is not None
+                                    else "",
+                                    result.publishing_cadence or "",
+                                    result.channel_age or "",
+                                ]
+                                report.hydrated_youtube_rows += 1
+                                source = result.source_url or resolved_url
+                                if source:
+                                    LOGGER.info("YouTube HIT row=%s source=%s", line_number, source)
+                                youtube_status = "hit"
+                        elif result and not result.accepted:
+                            if hint_handle or hint_url:
+                                youtube_values = [
+                                    hint_handle or result.handle or "",
+                                    hint_url or result.url or "",
+                                    "",
+                                    "",
+                                    "",
+                                ]
+                                report.hydrated_youtube_rows += 1
+                                LOGGER.info("YouTube HIT row=%s source=hint", line_number)
+                                youtube_status = "hit_hint"
+                            else:
+                                issue = LowConfidenceIssue(
+                                    row_number=line_number,
+                                    queries=queries,
+                                    candidate_url=result.url,
+                                    candidate_handle=result.handle,
+                                    confidence=result.confidence,
+                                    source=result.source,
+                                )
+                                report.low_confidence_rows.append(issue)
+                                if low_confidence_writer is not None:
+                                    low_confidence_writer.writerow(
+                                        [
+                                            issue.row_number,
+                                            " | ".join(issue.queries),
+                                            issue.candidate_url or "",
+                                            issue.candidate_handle or "",
+                                            issue.confidence
+                                            if issue.confidence is not None
+                                            else "",
+                                            issue.source or "",
+                                        ]
+                                    )
+                                youtube_status = "low_confidence"
                         else:
                             if hint_handle or hint_url:
                                 youtube_values = [
@@ -419,11 +584,17 @@ def copy_csv_rows(
                                 "item": row_name or f"row {line_number}",
                                 "status": youtube_status,
                                 "method": result.source if result else "unknown",
+                                "queries": queries,
                                 "youtube_handle": youtube_values[0],
                                 "youtube_url": youtube_values[1],
                                 "youtube_subs_count": youtube_values[2],
                                 "youtube_publishing_cadence": youtube_values[3],
                                 "youtube_channel_age": youtube_values[4],
+                                "youtube_source": result.source if result else None,
+                                "youtube_confidence": result.confidence if result else None,
+                                "youtube_evidence_sources": result.evidence_sources if result else None,
+                                "youtube_content_affinity": result.content_affinity if result else None,
+                                "youtube_recent_video_titles": result.recent_video_titles if result else None,
                             },
                         )
                     else:
@@ -439,17 +610,24 @@ def copy_csv_rows(
                                 "item": row_name or f"row {line_number}",
                                 "status": youtube_status,
                                 "method": "no-query",
+                                "queries": [],
                                 "youtube_handle": youtube_values[0],
                                 "youtube_url": youtube_values[1],
                                 "youtube_subs_count": youtube_values[2],
                                 "youtube_publishing_cadence": youtube_values[3],
                                 "youtube_channel_age": youtube_values[4],
+                                "youtube_source": None,
+                                "youtube_confidence": None,
+                                "youtube_evidence_sources": None,
+                                "youtube_content_affinity": None,
+                                "youtube_recent_video_titles": None,
                             },
                         )
 
                 instagram_values = ["", "", "", ""]
                 instagram_status = "disabled"
                 if instagram_lookup:
+                    hint_handle, _hint_url = _extract_instagram_hint(headers, row)
                     query = _build_instagram_query(headers, row)
                     if query:
                         _emit_event(
@@ -466,7 +644,7 @@ def copy_csv_rows(
                         result = instagram_lookup(query)
                         if result:
                             instagram_values = [
-                                result.handle or "",
+                                result.handle or hint_handle or "",
                                 str(result.followers)
                                 if result.followers is not None
                                 else "",
@@ -478,9 +656,15 @@ def copy_csv_rows(
                                 LOGGER.info("Instagram HIT row=%s source=%s", line_number, result.source_url)
                             instagram_status = "hit"
                         else:
-                            report.warning_rows += 1
-                            LOGGER.info("Instagram NO_HIT row=%s", line_number)
-                            instagram_status = "no_hit"
+                            if hint_handle:
+                                instagram_values = [hint_handle, "", "", ""]
+                                report.hydrated_instagram_rows += 1
+                                LOGGER.info("Instagram HIT row=%s source=hint", line_number)
+                                instagram_status = "hit_hint"
+                            else:
+                                report.warning_rows += 1
+                                LOGGER.info("Instagram NO_HIT row=%s", line_number)
+                                instagram_status = "no_hit"
                         _emit_event(
                             events_file,
                             {

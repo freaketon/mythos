@@ -18,6 +18,10 @@ LOGGER = logging.getLogger(__name__)
 
 _HANDLE_PATTERN = re.compile(r"[A-Za-z0-9._]+")
 _AT_HANDLE_PATTERN = re.compile(r"(?<![A-Za-z0-9._])@([A-Za-z0-9._]{3,30})")
+_INSTAGRAM_KEYWORD_HANDLE_PATTERN = re.compile(
+    r"(?:instagram|ig)(?!\.)\s*(?:handle|username)?\s*[:=\-]?\s*@?([A-Za-z0-9._]{3,30})",
+    re.IGNORECASE,
+)
 _INSTAGRAM_URL_PATTERN = re.compile(
     r"(?:https?://)?(?:www\.)?instagram\.com/([A-Za-z0-9._]{3,30})",
     re.IGNORECASE,
@@ -47,6 +51,10 @@ class InstagramSearchConfig:
 
 def _sanitize_handle(value: str) -> str | None:
     candidate = value.strip().lstrip("@")
+    if not candidate or candidate.startswith(".") or candidate.endswith("."):
+        return None
+    if candidate.lower() in {"com", "www"}:
+        return None
     match = _HANDLE_PATTERN.fullmatch(candidate)
     return candidate if match else None
 
@@ -58,6 +66,10 @@ def _candidate_handles(query: str) -> list[str]:
         if handle and handle not in handles:
             handles.append(handle)
     for match in _AT_HANDLE_PATTERN.finditer(query):
+        handle = _sanitize_handle(match.group(1).lower())
+        if handle and handle not in handles:
+            handles.append(handle)
+    for match in _INSTAGRAM_KEYWORD_HANDLE_PATTERN.finditer(query):
         handle = _sanitize_handle(match.group(1).lower())
         if handle and handle not in handles:
             handles.append(handle)
@@ -187,35 +199,35 @@ def _search_instagram_handles_serper(
     if not api_key:
         return set()
 
-    client = httpx.Client(timeout=10)
     handles: set[str] = set()
     search_queries = [f"{query} instagram", f"site:instagram.com {query}"]
-    for item_query in search_queries[: config.web_validation_queries]:
-        try:
-            response = _with_retry(
-                lambda: client.post(
-                    config.websearch_endpoint,
-                    headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-                    json={"q": item_query},
-                ),
-                attempts=config.retry_attempts,
-                backoff=config.retry_backoff,
-            )
-            data = response.json()
-        except Exception:
-            LOGGER.warning("Instagram websearch failed for query: %s", item_query)
-            continue
+    with httpx.Client(timeout=10) as client:
+        for item_query in search_queries[: config.web_validation_queries]:
+            try:
+                response = _with_retry(
+                    lambda: client.post(
+                        config.websearch_endpoint,
+                        headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+                        json={"q": item_query},
+                    ),
+                    attempts=config.retry_attempts,
+                    backoff=config.retry_backoff,
+                )
+                data = response.json()
+            except Exception:
+                LOGGER.warning("Instagram websearch failed for query: %s", item_query)
+                continue
 
-        organic = data.get("organic", [])
-        for organic_item in organic:
-            if not isinstance(organic_item, dict):
-                continue
-            link = organic_item.get("link")
-            if not isinstance(link, str):
-                continue
-            handle = _extract_handle_from_instagram_url(link)
-            if handle:
-                handles.add(handle.lower())
+            organic = data.get("organic", [])
+            for organic_item in organic:
+                if not isinstance(organic_item, dict):
+                    continue
+                link = organic_item.get("link")
+                if not isinstance(link, str):
+                    continue
+                handle = _extract_handle_from_instagram_url(link)
+                if handle:
+                    handles.add(handle.lower())
     return handles
 
 
@@ -235,31 +247,31 @@ def _search_instagram_handles_duckduckgo(
     query: str,
     config: InstagramSearchConfig,
 ) -> set[str]:
-    client = httpx.Client(timeout=10)
     handles: set[str] = set()
     search_queries = [f"{query} instagram", f"site:instagram.com {query}"]
-    for item_query in search_queries[: config.web_validation_queries]:
-        try:
-            response = _with_retry(
-                lambda: client.get(
-                    "https://duckduckgo.com/html/",
-                    params={"q": item_query},
-                    headers={"User-Agent": "Mozilla/5.0"},
-                    follow_redirects=True,
-                ),
-                attempts=config.retry_attempts,
-                backoff=config.retry_backoff,
-            )
-            html = response.text
-        except Exception:
-            LOGGER.warning("Instagram DuckDuckGo search failed for query: %s", item_query)
-            continue
-        for match in _HTML_HREF_PATTERN.finditer(html):
-            raw_href = match.group(1)
-            link = _extract_redirect_url(raw_href)
-            handle = _extract_handle_from_instagram_url(link)
-            if handle:
-                handles.add(handle.lower())
+    with httpx.Client(timeout=10) as client:
+        for item_query in search_queries[: config.web_validation_queries]:
+            try:
+                response = _with_retry(
+                    lambda: client.get(
+                        "https://duckduckgo.com/html/",
+                        params={"q": item_query},
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        follow_redirects=True,
+                    ),
+                    attempts=config.retry_attempts,
+                    backoff=config.retry_backoff,
+                )
+                html = response.text
+            except Exception:
+                LOGGER.warning("Instagram DuckDuckGo search failed for query: %s", item_query)
+                continue
+            for match in _HTML_HREF_PATTERN.finditer(html):
+                raw_href = match.group(1)
+                link = _extract_redirect_url(raw_href)
+                handle = _extract_handle_from_instagram_url(link)
+                if handle:
+                    handles.add(handle.lower())
     return handles
 
 
@@ -269,6 +281,13 @@ def _validate_instagram_candidate(
     config: InstagramSearchConfig,
 ) -> bool:
     if not config.web_validation:
+        return True
+    lowered = query.lower()
+    if f"instagram.com/{handle.lower()}" in lowered or f"@{handle.lower()}" in lowered:
+        return True
+    has_serper_key = bool(config.websearch_api_key or os.getenv("SERPER_API_KEY"))
+    if not has_serper_key:
+        LOGGER.info("SERPER_API_KEY is not configured; skipping strict Instagram web validation.")
         return True
 
     observed_handles = _search_instagram_handles_web(query, config)
