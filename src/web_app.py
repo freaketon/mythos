@@ -37,8 +37,10 @@ class RunStartRequest(BaseModel):
     low_confidence_path: str = DEFAULT_LOW_CONF
     youtube: bool = True
     instagram: bool = True
-    llm_rerank: bool = False
-    llm_model: str = "gpt-4o-mini"
+    llm_rerank: bool = True
+    # Default to a modern structured-output-capable model; the reranker will
+    # fall back to gpt-4o-mini if the chosen model isn't available.
+    llm_model: str = "gpt-5-mini"
     checkpoint_every: int = Field(default=10, ge=1)
     strict: bool = False
     limit: int | None = Field(default=None, ge=1)
@@ -384,6 +386,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         color: var(--text);
         line-height: 1.4;
       }
+      * { box-sizing: border-box; }
       h2 { margin: 0 0 14px 0; font-weight: 700; letter-spacing: 0.1px; }
       h3 { margin: 18px 0 10px 0; font-weight: 650; color: #273345; }
       .grid { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 10px; }
@@ -502,18 +505,83 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         border-radius: 999px;
       }
       #state { color: var(--muted); margin-left: 6px; }
+      .run-settings-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top:10px; }
+      .run-settings-compact { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+      @media (max-width: 980px) {
+        .grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+        .run-settings-grid { grid-template-columns: 1fr; }
+        .run-settings-compact { grid-template-columns: 1fr; }
+        .resizable { min-width: 0; }
+      }
     </style>
   </head>
   <body>
     <h2>Contact Enrichment Control</h2>
-    <div>
-      <button onclick="startRun()">Start</button>
-      <button onclick="stopRun()">Stop</button>
-      <label style="margin-left:10px; user-select:none">
-        <input id="llmRerank" type="checkbox" />
-        LLM rerank
-      </label>
-      <span id="state"></span>
+    <div class="status">
+      <b>Run Settings</b>
+      <div class="run-settings-grid">
+        <div>
+          <div class="k">Input CSV</div>
+          <input id="inputPath" class="mono" type="text" value="MVI - Elite Outreach List & Tracker - Master List - Elite - Intake - 3009 - 11_16_2025.csv"
+            style="width:100%; padding:7px 10px; border:1px solid var(--line-strong); border-radius:10px" />
+        </div>
+        <div>
+          <div class="k">Output CSV (Hydrated)</div>
+          <input id="outputPath" class="mono" type="text" value="MVI - Elite Outreach List & Tracker - Master List - Elite - Intake - 3009 - 11_16_2025.hydrated.full.csv"
+            style="width:100%; padding:7px 10px; border:1px solid var(--line-strong); border-radius:10px" />
+        </div>
+        <div>
+          <div class="k">Low Confidence CSV</div>
+          <input id="lowConfPath" class="mono" type="text" value="MVI - Elite Outreach List & Tracker - Master List - Elite - Intake - 3009 - 11_16_2025.low-confidence.full.csv"
+            style="width:100%; padding:7px 10px; border:1px solid var(--line-strong); border-radius:10px" />
+        </div>
+        <div class="run-settings-compact">
+	          <div>
+	            <div class="k" title="Flush output files + emit a progress checkpoint line every N processed rows.">Checkpoint Every</div>
+	            <input id="checkpointEvery" class="mono" type="number" min="1" value="10"
+	              style="width:100%; padding:7px 10px; border:1px solid var(--line-strong); border-radius:10px" />
+	          </div>
+          <div>
+            <div class="k">Limit (blank = all)</div>
+            <input id="limit" class="mono" type="number" min="1" placeholder=""
+              style="width:100%; padding:7px 10px; border:1px solid var(--line-strong); border-radius:10px" />
+          </div>
+          <div>
+            <div class="k">LLM Model</div>
+            <select id="llmModelSelect" class="mono"
+              style="width:100%; padding:7px 10px; border:1px solid var(--line-strong); border-radius:10px; background:#fff">
+              <optgroup label="GPT-5 (recommended)">
+                <option value="gpt-5-mini" selected>gpt-5-mini (best default)</option>
+                <option value="gpt-5-nano">gpt-5-nano (fastest/cheapest)</option>
+                <option value="gpt-5">gpt-5</option>
+                <option value="gpt-5.1">gpt-5.1 (higher quality)</option>
+                <option value="gpt-5.2">gpt-5.2 (highest quality)</option>
+              </optgroup>
+              <optgroup label="GPT-4 (fallback)">
+                <option value="gpt-4o-mini">gpt-4o-mini</option>
+                <option value="gpt-4o">gpt-4o</option>
+                <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+                <option value="gpt-4.1">gpt-4.1</option>
+              </optgroup>
+              <option value="custom">Custom...</option>
+            </select>
+            <input id="llmModelCustom" class="mono" type="text" value=""
+              placeholder="custom-model-name"
+              style="display:none; width:100%; margin-top:6px; padding:7px 10px; border:1px solid var(--line-strong); border-radius:10px" />
+          </div>
+        </div>
+      </div>
+      <div style="display:flex; flex-wrap:wrap; align-items:center; gap: 14px; margin-top:10px">
+        <label style="user-select:none"><input id="youtubeEnabled" type="checkbox" checked /> YouTube</label>
+        <label style="user-select:none"><input id="instagramEnabled" type="checkbox" checked /> Instagram</label>
+        <label style="user-select:none"><input id="llmRerank" type="checkbox" checked /> LLM rerank</label>
+        <label style="user-select:none"><input id="strict" type="checkbox" /> Strict</label>
+        <span id="state" style="margin-left:auto"></span>
+      </div>
+      <div style="margin-top:10px">
+        <button onclick="startRun()">Start</button>
+        <button onclick="stopRun()">Stop</button>
+      </div>
     </div>
     <div style="margin-top:10px"><progress id="bar" value="0" max="100"></progress></div>
     <div class="grid" style="margin-top:10px">
@@ -1032,11 +1100,49 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         renderInspector();
       }
       async function startRun() {
+        const input_path = String(document.getElementById('inputPath')?.value || '').trim();
+        const output_path = String(document.getElementById('outputPath')?.value || '').trim();
+        const low_confidence_path = String(document.getElementById('lowConfPath')?.value || '').trim();
+        const youtube = Boolean(document.getElementById('youtubeEnabled')?.checked);
+        const instagram = Boolean(document.getElementById('instagramEnabled')?.checked);
         const llm_rerank = Boolean(document.getElementById('llmRerank')?.checked);
+        const selected = String(document.getElementById('llmModelSelect')?.value || 'gpt-5-mini');
+        const llm_model = (selected === 'custom')
+          ? (String(document.getElementById('llmModelCustom')?.value || '').trim() || 'gpt-5-mini')
+          : selected;
+        const strict = Boolean(document.getElementById('strict')?.checked);
+        const checkpoint_every_raw = String(document.getElementById('checkpointEvery')?.value || '').trim();
+        const checkpoint_every = Math.max(1, Number(checkpoint_every_raw || 10));
+        const limit_raw = String(document.getElementById('limit')?.value || '').trim();
+        const limit = limit_raw ? Math.max(1, Number(limit_raw)) : null;
+
+        if (!input_path) {
+          setActivity('Start failed: input_path is required', false);
+          return;
+        }
+        if (!output_path) {
+          setActivity('Start failed: output_path is required', false);
+          return;
+        }
+        if (!low_confidence_path) {
+          setActivity('Start failed: low_confidence_path is required', false);
+          return;
+        }
         const response = await fetch('/run/start', {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ llm_rerank })
+          body: JSON.stringify({
+            input_path,
+            output_path,
+            low_confidence_path,
+            youtube,
+            instagram,
+            llm_rerank,
+            llm_model,
+            strict,
+            checkpoint_every,
+            limit
+          })
         });
         if (!response.ok) {
           const payload = await response.json().catch(() => ({}));
@@ -1053,6 +1159,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         renderHistoryTable();
         renderOutputTable();
         renderLowConfTable();
+        fetchInputPreview();
         setActivity('Run starting...', true);
       }
       async function stopRun() {
@@ -1074,6 +1181,12 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         renderInsights();
         renderInspector();
       }
+      document.getElementById('llmModelSelect')?.addEventListener('change', (e) => {
+        const v = String(e?.target?.value || '');
+        const custom = document.getElementById('llmModelCustom');
+        if (!custom) return;
+        custom.style.display = (v === 'custom') ? 'block' : 'none';
+      });
       fetchInputPreview(); preloadOutputPreview(); renderLowConfTable(); tick(); setInterval(tick, 3000);
     </script>
   </body>

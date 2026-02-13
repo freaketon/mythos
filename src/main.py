@@ -61,8 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--llm-model",
         type=str,
-        default="gpt-4o-mini",
-        help="OpenAI model name for reranking (default: gpt-4o-mini).",
+        default="gpt-5-mini",
+        help="OpenAI model name for reranking (default: gpt-5-mini).",
     )
     return parser
 

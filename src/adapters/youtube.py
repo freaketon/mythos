@@ -106,7 +106,7 @@ class YouTubeSearchConfig:
     yt_dlp_enabled: bool = True
     yt_dlp_timeout: float = 10.0
     llm_rerank: bool = False
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "gpt-5-mini"
     llm_max_candidates: int = 6
     llm_timeout: float = 12.0
     openai_api_key: str | None = None
@@ -853,22 +853,72 @@ def _llm_rerank(
         },
     }
 
+    def _is_model_or_format_error(payload: object, status_code: int) -> bool:
+        # Only retry on likely "model doesn't exist / not allowed / incompatible response_format" errors.
+        if status_code not in (400, 404):
+            return False
+        if not isinstance(payload, dict):
+            return True
+        err = payload.get("error")
+        if not isinstance(err, dict):
+            return True
+        msg = err.get("message")
+        if not isinstance(msg, str) or not msg.strip():
+            return True
+        lower = msg.lower()
+        needles = (
+            "model",
+            "not found",
+            "does not exist",
+            "no such model",
+            "not have access",
+            "response_format",
+            "json_schema",
+            "structured",
+            "unsupported",
+        )
+        return any(n in lower for n in needles)
+
+    def _post_rerank(client: httpx.Client, model: str) -> tuple[dict[str, object] | None, object, int]:
+        resp = client.post(
+            config.openai_endpoint,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "temperature": 0,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "response_format": {"type": "json_schema", "json_schema": schema},
+            },
+        )
+        try:
+            payload: object = resp.json()
+        except Exception:
+            payload = None
+        if resp.status_code >= 400:
+            return None, payload, resp.status_code
+        if not isinstance(payload, dict):
+            return None, payload, resp.status_code
+        return payload, payload, resp.status_code
+
     try:
         with httpx.Client(timeout=config.llm_timeout) as client:
-            resp = client.post(
-                config.openai_endpoint,
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": config.llm_model,
-                    "temperature": 0,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    "response_format": {"type": "json_schema", "json_schema": schema},
-                },
-            )
-            data = resp.json()
+            data: dict[str, object] | None = None
+            fallback = "gpt-4o-mini"
+            models_to_try = [config.llm_model]
+            if config.llm_model != fallback:
+                models_to_try.append(fallback)
+            for i, model in enumerate(models_to_try):
+                payload, raw, status = _post_rerank(client, model=model)
+                if payload is not None:
+                    data = payload
+                    break
+                if i == 0 and not _is_model_or_format_error(raw, status_code=status):
+                    break
+            if data is None:
+                return None, False
     except Exception:
         return None, False
 
