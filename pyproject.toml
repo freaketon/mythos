@@ -6,6 +6,7 @@ readme = ".agent/prd.md"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.128.8",
+  "httpx>=0.27.0",
   "instaloader>=4.15",
   "pydantic>=2.10.0",
   "scrapetube>=2.6.0",

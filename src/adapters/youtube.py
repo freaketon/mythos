@@ -43,6 +43,7 @@ class ScrapetubeVideoResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     publishedTimeText: str | dict[str, object] | None = None
+    title: str | dict[str, object] | None = None
 
 
 class YouTubeChannelData(BaseModel):
@@ -835,6 +836,53 @@ def find_youtube_channel(
     config: YouTubeSearchConfig | None = None,
 ) -> YouTubeChannelData | None:
     return find_best_youtube_channel([query], config=config)
+
+
+def fetch_recent_video_titles(
+    *,
+    channel_id: str | None = None,
+    channel_url: str | None = None,
+    limit: int = 5,
+    config: YouTubeSearchConfig | None = None,
+) -> list[str]:
+    """
+    Best-effort recent video titles for a channel.
+
+    This is used for qualification/cold-outreach grounding.
+    """
+    config = config or YouTubeSearchConfig()
+    if limit <= 0:
+        return []
+    if not channel_id and not channel_url:
+        return []
+    try:
+        videos = _with_retry(
+            lambda: list(
+                scrapetube.get_channel(
+                    channel_id=channel_id,
+                    channel_url=channel_url if channel_id is None else None,
+                    limit=max(1, limit),
+                    sleep=config.request_sleep,
+                )
+            ),
+            attempts=config.retry_attempts,
+            backoff=config.retry_backoff,
+        )
+    except Exception:
+        return []
+
+    results = _coerce_video_results(videos)
+    titles: list[str] = []
+    for video in results:
+        title = _extract_text(video.title)
+        title = (title or "").strip()
+        if not title:
+            continue
+        if title not in titles:
+            titles.append(title)
+        if len(titles) >= limit:
+            break
+    return titles
 def _with_retry(func, *, attempts: int, backoff: float):
     last_error: Exception | None = None
     for attempt in range(attempts):
