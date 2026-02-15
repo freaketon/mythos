@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
 from src.adapters.instagram import InstagramProfileData
 from src.adapters.youtube import YouTubeChannelData
+from src.tabular_input import count_data_rows, open_input_rows
 
 LOGGER = logging.getLogger(__name__)
 
@@ -262,10 +263,7 @@ def _extract_instagram_hint(headers: list[str], row: list[str]) -> tuple[str | N
 
 
 def _count_data_rows(input_path: Path) -> int:
-    with input_path.open("r", encoding="utf-8", newline="") as input_file:
-        reader = csv.reader(input_file)
-        next(reader, None)
-        return sum(1 for _ in reader)
+    return count_data_rows(input_path)
 
 
 def _emit_event(events_file: TextIO | None, payload: dict[str, object]) -> None:
@@ -320,11 +318,9 @@ def copy_csv_rows(
     if events_path is not None:
         events_file = events_path.open("w", encoding="utf-8", newline="\n")
 
-    with input_path.open("r", encoding="utf-8", newline="") as input_file:
-        reader = csv.reader(input_file)
-        headers = next(reader, None)
-        if headers is None:
-            raise ValueError("Input CSV missing header row.")
+    with open_input_rows(input_path) as (headers, row_iter):
+        if not headers:
+            raise ValueError("Input missing header row.")
 
         normalized_headers = _normalize_headers(headers)
         row_model = _build_row_model(normalized_headers)
@@ -335,7 +331,7 @@ def copy_csv_rows(
             writer = csv.writer(output_file)
             writer.writerow(output_headers)
 
-            for line_number, row in enumerate(reader, start=2):
+            for line_number, row in row_iter:
                 if row_limit is not None and report.total_rows >= row_limit:
                     break
                 report.total_rows += 1

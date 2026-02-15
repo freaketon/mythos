@@ -16,6 +16,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from src.tabular_input import count_data_rows, preview_rows
+
 CHECKPOINT_PATTERN = re.compile(
     r"Checkpoint:\s+processed=(?P<processed>\d+)/(?P<total>\d+)\s+remaining=(?P<remaining>\d+)\s+valid=(?P<valid>\d+)\s+invalid=(?P<invalid>\d+)\s+youtube=(?P<youtube>\d+)\s+instagram=(?P<instagram>\d+)\s+low_conf=(?P<low_conf>\d+)"
 )
@@ -58,11 +60,16 @@ def _safe_upload_filename(name: str) -> str:
         else:
             cleaned.append("_")
     out = "".join(cleaned).strip().replace("  ", " ")
-    if not out.lower().endswith(".csv"):
-        out = out + ".csv"
-    # Prevent degenerate names.
-    if out in (".csv",):
-        out = "input.csv"
+    lower = out.lower()
+    if lower.endswith(".xlsx"):
+        # Keep as-is.
+        pass
+    else:
+        if not lower.endswith(".csv"):
+            out = out + ".csv"
+        # Prevent degenerate names.
+        if out in (".csv",):
+            out = "input.csv"
     return out
 
 
@@ -103,12 +110,18 @@ class RunPaths:
         return self.base_dir / RUN_EVENTS
 
 
+def _count_input_rows(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return count_data_rows(path)
+
+
 def _count_rows(csv_path: Path) -> int:
+    """Count rows in a CSV file (excluding header)."""
     if not csv_path.exists():
         return 0
     with csv_path.open("r", encoding="utf-8", newline="") as file:
         return max(0, sum(1 for _ in file) - 1)
-
 
 def _read_checkpoint(err_log: Path) -> dict[str, int]:
     if not err_log.exists():
@@ -362,15 +375,7 @@ def _csv_preview_paged(path: Path, *, offset: int = 0, limit: int = 200) -> dict
 
 
 def _input_preview(path: Path, limit: int = 30) -> dict[str, Any]:
-    if not path.exists():
-        return {"headers": [], "rows": []}
-    rows: list[list[str]] = []
-    with path.open("r", encoding="utf-8", newline="") as file:
-        reader = csv.reader(file)
-        headers = next(reader, [])
-        for _, row in zip(range(limit), reader):
-            rows.append(row)
-    return {"headers": headers, "rows": rows}
+    return preview_rows(path, limit=limit)  # type: ignore[return-value]
 
 
 def _output_preview(path: Path, limit: int = 30) -> dict[str, Any]:
@@ -556,13 +561,13 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
       <b>Run Settings</b>
       <div class="run-settings-grid">
 	        <div>
-	          <div class="k">Input CSV</div>
+	          <div class="k">Input File (CSV/XLSX)</div>
 	          <div style="display:flex; gap:8px; align-items:center">
 	            <input id="inputPath" class="mono" type="text" value="MVI - Elite Outreach List & Tracker - Master List - Elite - Intake - 3009 - 11_16_2025.csv"
 	              style="flex:1; width:100%; padding:7px 10px; border:1px solid var(--line-strong); border-radius:10px" oninput="fetchInputPreview()" />
 	            <button type="button" onclick="browseInputCsv()">Browse...</button>
 	          </div>
-	          <input id="inputBrowse" type="file" accept=".csv,text/csv" style="display:none" />
+	          <input id="inputBrowse" type="file" accept=".csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display:none" />
 	        </div>
         <div>
           <div class="k">Output CSV (Hydrated)</div>
@@ -804,13 +809,17 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
 	      }
 	      async function uploadInputCsv(file) {
 	        if (!file) return;
-	        setActivity('Uploading input CSV: ' + (file.name || '(unnamed)'), false);
+	        setActivity('Uploading input file: ' + (file.name || '(unnamed)'), false);
 	        const buf = await file.arrayBuffer();
+          const lower = String(file.name || '').toLowerCase();
+          const contentType = lower.endsWith('.xlsx')
+            ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            : 'text/csv';
 	        const resp = await fetch('/run/upload-input', {
 	          method: 'POST',
 	          headers: {
-	            'Content-Type': 'text/csv',
-	            'X-Filename': String(file.name || 'input.csv'),
+	            'Content-Type': contentType,
+	            'X-Filename': String(file.name || (lower.endsWith('.xlsx') ? 'input.xlsx' : 'input.csv')),
 	          },
 	          body: buf
 	        });
@@ -827,7 +836,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
 	          if (input) input.value = saved;
 	        }
 	        await fetchInputPreview();
-	        setActivity('Uploaded input CSV: ' + (saved || file.name), false);
+	        setActivity('Uploaded input file: ' + (saved || file.name), false);
 	      }
 	      async function preloadOutputPreview() {
 	        const r = await fetch('/run/output-preview?limit=200'); const p = await r.json();
@@ -1418,7 +1427,9 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
                 "low_confidence_path": low_confidence_path.name,
                 "input_path": payload.input_path,
                 # Enables immediate progress reporting even before the first checkpoint log line.
-                "planned_total": payload.limit if payload.limit is not None else _count_rows(base / payload.input_path),
+                "planned_total": payload.limit
+                if payload.limit is not None
+                else _count_input_rows(base / payload.input_path),
             },
         )
         return {"state": "running", "pid": proc.pid}
@@ -1494,7 +1505,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         # Update state so previews work immediately and the default run input is correct.
         state = _read_state(paths)
         state["input_path"] = filename
-        state["planned_total"] = _count_rows(dest)
+        state["planned_total"] = _count_input_rows(dest)
         _write_state(paths, state)
 
         return {"saved_as": filename, "bytes": len(body)}

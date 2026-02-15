@@ -27,6 +27,9 @@ _INSTAGRAM_URL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _HTML_HREF_PATTERN = re.compile(r'href="([^"]+)"')
+_URL_PATTERN = re.compile(r"\bhttps?://[^\s)>\"]+", re.IGNORECASE)
+_DOMAIN_PATTERN = re.compile(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", re.IGNORECASE)
+_WEBSITE_INSTAGRAM_CACHE: dict[str, list[str]] = {}
 
 
 class InstagramProfileData(BaseModel):
@@ -47,6 +50,9 @@ class InstagramSearchConfig:
     websearch_endpoint: str = "https://google.serper.dev/search"
     web_validation: bool = True
     web_validation_queries: int = 3
+    website_discovery: bool = True
+    website_discovery_max_domains: int = 1
+    website_discovery_timeout: float = 6.0
 
 
 def _sanitize_handle(value: str) -> str | None:
@@ -243,6 +249,69 @@ def _extract_redirect_url(href: str) -> str:
     return href
 
 
+def _discover_instagram_handles_from_website(url: str, config: InstagramSearchConfig) -> list[str]:
+    """
+    Best-effort extraction of Instagram handles from a company website HTML page.
+    """
+    parsed = urlparse((url or "").strip())
+    host = (parsed.netloc or parsed.path).strip().lower()
+    host = host.replace("www.", "")
+    if not host or "instagram.com" in host:
+        return []
+    if host in _WEBSITE_INSTAGRAM_CACHE:
+        return _WEBSITE_INSTAGRAM_CACHE[host]
+
+    candidates = [f"https://{host}", f"https://www.{host}", f"http://{host}"]
+    handles: list[str] = []
+    with httpx.Client(timeout=config.website_discovery_timeout) as client:
+        for base in candidates:
+            try:
+                resp = _with_retry(
+                    lambda: client.get(
+                        base,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        follow_redirects=True,
+                    ),
+                    attempts=config.retry_attempts,
+                    backoff=config.retry_backoff,
+                )
+            except Exception:
+                continue
+            html = getattr(resp, "text", "") or ""
+            for match in _HTML_HREF_PATTERN.finditer(html):
+                href = match.group(1)
+                handle = _extract_handle_from_instagram_url(href)
+                if handle and handle.lower() not in handles:
+                    handles.append(handle.lower())
+            if handles:
+                break
+
+    _WEBSITE_INSTAGRAM_CACHE[host] = handles
+    return handles
+
+
+def _website_discovery_handles(query: str, config: InstagramSearchConfig) -> list[str]:
+    if not config.website_discovery:
+        return []
+    seeds: list[str] = []
+    for m in _URL_PATTERN.finditer(query or ""):
+        u = m.group(0)
+        if u not in seeds:
+            seeds.append(u)
+    for m in _DOMAIN_PATTERN.finditer(query or ""):
+        d = m.group(0)
+        seed = f"https://{d}"
+        if seed not in seeds:
+            seeds.append(seed)
+
+    out: list[str] = []
+    for seed in seeds[: max(0, config.website_discovery_max_domains)]:
+        for handle in _discover_instagram_handles_from_website(seed, config):
+            if handle not in out:
+                out.append(handle)
+    return out
+
+
 def _search_instagram_handles_duckduckgo(
     query: str,
     config: InstagramSearchConfig,
@@ -305,6 +374,12 @@ def find_instagram_profile(
     config = config or InstagramSearchConfig()
     loader = loader or instaloader.Instaloader()
     candidate_handles = _candidate_handles(query)
+    validation_query = query
+    if not candidate_handles and config.website_discovery:
+        discovered = _website_discovery_handles(query, config)
+        if discovered:
+            candidate_handles.extend([h for h in discovered if h not in candidate_handles])
+            validation_query = (query + " " + " ".join(f"instagram.com/{h}" for h in discovered)).strip()
     if not candidate_handles:
         candidate_handles.extend(
             handle for handle in _search_instagram_handles_web(query, config) if handle not in candidate_handles
@@ -329,7 +404,7 @@ def find_instagram_profile(
                 time.sleep(config.retry_backoff * (attempt + 1))
         if profile is None:
             continue
-        if not _validate_instagram_candidate(query, handle, config):
+        if not _validate_instagram_candidate(validation_query, handle, config):
             LOGGER.warning(
                 "Instagram candidate failed web validation: handle=%s query=%s",
                 handle,

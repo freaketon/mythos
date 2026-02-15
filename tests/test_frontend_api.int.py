@@ -103,6 +103,79 @@ def test_input_preview_returns_headers_and_rows(tmp_path: Path) -> None:
     assert payload["rows"] == [["1", "2"]]
 
 
+def test_input_preview_reads_xlsx(tmp_path: Path) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+
+    input_xlsx = tmp_path / "sample.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["A", "B"])
+    ws.append([1, 2])
+    ws.append([3, 4])
+    wb.save(input_xlsx)
+    wb.close()
+
+    state = tmp_path / "run.state.json"
+    state.write_text(
+        json.dumps(
+            {
+                "pid": 123,
+                "input_path": "sample.xlsx",
+                "command": ["python", "-m", "src.main", "--input", "sample.xlsx"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/run/input-preview?limit=1")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["headers"] == ["A", "B"]
+    assert payload["rows"] == [["1", "2"]]
+
+
+def test_upload_input_accepts_xlsx_and_updates_state(tmp_path: Path) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["A", "B"])
+    ws.append([1, 2])
+    ws.append([3, 4])
+    from io import BytesIO
+
+    buf = BytesIO()
+    wb.save(buf)
+    wb.close()
+    body = buf.getvalue()
+
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/run/upload-input",
+        content=body,
+        headers={
+            "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "x-filename": "contacts.xlsx",
+        },
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["saved_as"].endswith(".xlsx")
+
+    # State is updated for preview + run defaults.
+    state = json.loads((tmp_path / "run.state.json").read_text(encoding="utf-8"))
+    assert state["input_path"] == payload["saved_as"]
+    assert state["planned_total"] == 2
+
+    preview = client.get("/run/input-preview?limit=10")
+    assert preview.status_code == 200
+    assert preview.json()["headers"] == ["A", "B"]
+
+
 def test_events_endpoint_streams_from_offset(tmp_path: Path) -> None:
     events = tmp_path / "run.events.jsonl"
     events.write_text(

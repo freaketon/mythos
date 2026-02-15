@@ -2192,7 +2192,7 @@ def _website_discovery_candidates(queries: list[str], config: YouTubeSearchConfi
                 if not channel_id and _extract_custom_from_url(url):
                     channel_id = _yt_dlp_resolve_channel_id(url, config)
                 if channel_id:
-                    resolved = _youtube_api_channel_candidate(channel_id, "website+youtube-api", config)
+                    resolved = _youtube_api_channel_candidate(channel_id, f"website:{base}+youtube-api", config)
                     if resolved:
                         candidates.append(resolved)
                         continue
@@ -2203,7 +2203,7 @@ def _website_discovery_candidates(queries: list[str], config: YouTubeSearchConfi
                         url=url,
                         subscriber_count=None,
                         channel_id=channel_id,
-                        source="website",
+                        source=f"website:{base}",
                     )
                 )
         if candidates:
@@ -2290,10 +2290,33 @@ def find_best_youtube_channel(
     best_evidence = sorted(evidence_sources.get(best_identity, {best.source}))
     best_affinity = _content_affinity(signals, best)
     content_mismatch = False
+    website_conflict = False
     web_validation_failed = False
     url_missing = False
     api_required = False
     api_verified: bool | None = None
+
+    # If the company's website links to exactly one channel, treat that as authoritative.
+    # Don't accept a different channel unless the lead explicitly hinted it.
+    if accepted and not best.source.startswith(("hint", "website")):
+        website_identities = {
+            _candidate_identity(c) for c in candidates if c.source.startswith("website")
+        }
+        if len(website_identities) == 1 and best_identity not in website_identities:
+            accepted = False
+            website_conflict = True
+            best = YouTubeCandidate(
+                title=best.title,
+                handle=best.handle,
+                url=best.url,
+                subscriber_count=best.subscriber_count,
+                channel_id=best.channel_id,
+                published_at=best.published_at,
+                uploads_playlist_id=best.uploads_playlist_id,
+                source=f"{best.source}+website-conflict",
+            )
+            best_identity = _candidate_identity(best)
+            best_evidence = sorted(evidence_sources.get(best_identity, {best.source}))
 
     # Content sanity check: if the lead has strong anchors (domain / brand / email localpart),
     # don't accept a channel whose recent titles are completely unrelated unless we have
@@ -2360,6 +2383,8 @@ def find_best_youtube_channel(
                 tags.append("content-weak")
             else:
                 tags.append("content-ok")
+        if website_conflict:
+            tags.append("website-conflict")
         if web_validation_failed:
             tags.append("web-fail")
         if url_missing:
