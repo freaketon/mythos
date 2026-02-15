@@ -267,9 +267,11 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         color: var(--text);
         line-height: 1.4;
       }
+      .k { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
       h2 { margin: 0 0 14px 0; font-weight: 700; letter-spacing: 0.1px; }
       h3 { margin: 18px 0 10px 0; font-weight: 650; color: #273345; }
       .grid { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 10px; }
+      .prompt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
       .card {
         background: linear-gradient(180deg, #fff 0%, var(--panel-soft) 100%);
         border: 1px solid var(--line);
@@ -352,6 +354,11 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         padding: 6px;
         box-shadow: var(--shadow);
       }
+      @media (max-width: 980px) {
+        .grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+        .prompt-grid { grid-template-columns: 1fr; }
+        .resizable { min-width: 0; }
+      }
       tr.row-active td { background: #fff5cf; }
       button {
         margin-right: 8px;
@@ -405,7 +412,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
     </div>
     <div class="status">
       <b>Qualification Prompts (IG DM)</b>
-      <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top:10px">
+      <div class="prompt-grid">
         <div>
           <div class="k">ICP Prompt</div>
           <textarea id="icpPrompt" rows="8"
