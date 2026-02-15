@@ -102,6 +102,29 @@ def test_input_preview_returns_headers_and_rows(tmp_path: Path) -> None:
     assert payload["rows"] == [["1", "2"]]
 
 
+def test_qualify_prompts_roundtrip(tmp_path: Path) -> None:
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    get1 = client.get("/qualify/prompts")
+    assert get1.status_code == 200
+    assert get1.json() == {"icp_prompt": "", "product_prompt": ""}
+
+    set_resp = client.post(
+        "/qualify/prompts",
+        json={"icp_prompt": "ICP here", "product_prompt": "Product here"},
+    )
+    assert set_resp.status_code == 200
+
+    get2 = client.get("/qualify/prompts")
+    assert get2.status_code == 200
+    assert get2.json()["icp_prompt"] == "ICP here"
+    assert get2.json()["product_prompt"] == "Product here"
+
+    assert (tmp_path / "qualify.icp.txt").read_text(encoding="utf-8") == "ICP here"
+    assert (tmp_path / "qualify.product.txt").read_text(encoding="utf-8") == "Product here"
+
+
 def test_events_endpoint_streams_from_offset(tmp_path: Path) -> None:
     events = tmp_path / "run.events.jsonl"
     events.write_text(

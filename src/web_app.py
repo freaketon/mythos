@@ -27,6 +27,8 @@ RUN_LOG_OUT = "run.full.out.log"
 RUN_LOG_ERR = "run.full.err.log"
 RUN_EVENTS = "run.events.jsonl"
 RUN_STATE = "run.state.json"
+QUAL_ICP_PROMPT_FILE = "qualify.icp.txt"
+QUAL_PRODUCT_PROMPT_FILE = "qualify.product.txt"
 
 
 class RunStartRequest(BaseModel):
@@ -39,6 +41,11 @@ class RunStartRequest(BaseModel):
     strict: bool = False
     limit: int | None = Field(default=None, ge=1)
     events_path: str = RUN_EVENTS
+
+
+class QualifyPrompts(BaseModel):
+    icp_prompt: str = ""
+    product_prompt: str = ""
 
 
 @dataclass
@@ -226,6 +233,8 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
     app = FastAPI(title="Contact Enrichment Control")
     base = base_dir or Path.cwd()
     paths = RunPaths(base)
+    icp_path = base / QUAL_ICP_PROMPT_FILE
+    product_path = base / QUAL_PRODUCT_PROMPT_FILE
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -392,6 +401,26 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
       <div class="activity-wrap">
         <span id="activitySpinner" class="spinner"></span>
         <span id="activity">Idle</span>
+      </div>
+    </div>
+    <div class="status">
+      <b>Qualification Prompts (IG DM)</b>
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top:10px">
+        <div>
+          <div class="k">ICP Prompt</div>
+          <textarea id="icpPrompt" rows="8"
+            style="width:100%; padding:10px; border:1px solid var(--line); border-radius:12px; resize:vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size: 12px;"></textarea>
+        </div>
+        <div>
+          <div class="k">Product Prompt</div>
+          <textarea id="productPrompt" rows="8"
+            style="width:100%; padding:10px; border:1px solid var(--line); border-radius:12px; resize:vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size: 12px;"></textarea>
+        </div>
+      </div>
+      <div style="margin-top:10px">
+        <button onclick="loadQualPrompts()">Reload prompts</button>
+        <button onclick="saveQualPrompts()">Save prompts</button>
+        <span class="k">Saved to qualify.icp.txt and qualify.product.txt</span>
       </div>
     </div>
     <h3>History (Hit / No Hit)</h3>
@@ -622,8 +651,38 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         setActivity('Run starting...', true);
       }
       async function stopRun() { await fetch('/run/stop', { method: 'POST' }); }
+      async function loadQualPrompts() {
+        const r = await fetch('/qualify/prompts');
+        if (!r.ok) {
+          setActivity('Failed to load qualification prompts (status ' + r.status + ')', false);
+          return;
+        }
+        const p = await r.json().catch(() => ({}));
+        const icp = String(p.icp_prompt || '');
+        const product = String(p.product_prompt || '');
+        const icpEl = document.getElementById('icpPrompt');
+        const productEl = document.getElementById('productPrompt');
+        if (icpEl) icpEl.value = icp;
+        if (productEl) productEl.value = product;
+        setActivity('Loaded qualification prompts', false);
+      }
+      async function saveQualPrompts() {
+        const icp = String(document.getElementById('icpPrompt')?.value || '');
+        const product = String(document.getElementById('productPrompt')?.value || '');
+        const r = await fetch('/qualify/prompts', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ icp_prompt: icp, product_prompt: product }),
+        });
+        if (!r.ok) {
+          const p = await r.json().catch(() => ({}));
+          setActivity('Failed to save prompts: ' + String(p.detail || r.status), false);
+          return;
+        }
+        setActivity('Saved qualification prompts', false);
+      }
       async function tick() { await fetchStatus(); await fetchEvents(); }
-      fetchInputPreview(); preloadOutputPreview(); tick(); setInterval(tick, 3000);
+      fetchInputPreview(); preloadOutputPreview(); loadQualPrompts(); tick(); setInterval(tick, 3000);
     </script>
   </body>
 </html>
@@ -719,6 +778,21 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
             return {"state": "idle", "stopped": False}
         os.kill(pid, signal.SIGTERM)
         return {"state": "stopping", "stopped": True}
+
+    @app.get("/qualify/prompts")
+    def qualify_get_prompts() -> dict[str, Any]:
+        icp = icp_path.read_text(encoding="utf-8", errors="ignore") if icp_path.exists() else ""
+        product = product_path.read_text(encoding="utf-8", errors="ignore") if product_path.exists() else ""
+        return {"icp_prompt": icp, "product_prompt": product}
+
+    @app.post("/qualify/prompts")
+    def qualify_set_prompts(payload: QualifyPrompts) -> dict[str, Any]:
+        max_len = 200_000
+        if len(payload.icp_prompt) > max_len or len(payload.product_prompt) > max_len:
+            raise HTTPException(status_code=413, detail="Prompt too large.")
+        icp_path.write_text(payload.icp_prompt or "", encoding="utf-8")
+        product_path.write_text(payload.product_prompt or "", encoding="utf-8")
+        return {"saved": True}
 
     @app.get("/run/logs")
     def run_logs(tail: int = 200) -> dict[str, Any]:
