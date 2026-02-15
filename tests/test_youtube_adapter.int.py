@@ -13,6 +13,18 @@ from src.adapters.youtube import (
     find_youtube_channel,
 )
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _disable_website_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Keep tests hermetic: website discovery performs live HTTP fetches.
+    monkeypatch.setattr(youtube_adapter, "_website_discovery_candidates", lambda *_a, **_k: [])
+    # Keep tests hermetic: existence checks perform live HTTP fetches.
+    monkeypatch.setattr(youtube_adapter, "_youtube_url_exists", lambda *_a, **_k: True)
+    # Keep tests hermetic: video sampling performs live HTTP fetches via scrapetube.
+    monkeypatch.setattr(scrapetube, "get_channel", lambda *_a, **_k: [])
+
 
 def _fake_search_results() -> Iterable[dict[str, str]]:
     return [
@@ -56,6 +68,7 @@ def test_find_youtube_channel_integration(monkeypatch) -> None:
     assert result.handle == "@MrBeast"
     assert result.url == "https://www.youtube.com/@MrBeast"
     assert result.subscriber_count == 100_000_000
+    assert result.subscriber_count_source == "scrapetube"
     assert result.publishing_cadence == "Weekly or more"
     assert result.channel_age == "10 years"
 
@@ -96,6 +109,54 @@ def test_find_best_youtube_channel_falls_back_to_yt_search(monkeypatch) -> None:
     assert result is not None
     assert result.handle == "@MockClient"
     assert result.url == "https://www.youtube.com/channel/UC999"
+    assert result.accepted is True
+
+
+def test_find_best_youtube_channel_keeps_searching_when_first_source_is_weak(
+    monkeypatch,
+) -> None:
+    def fake_get_search(*_args, **_kwargs):
+        return [
+            {
+                "channelId": "UCWRONG",
+                "channelTitle": "Unrelated Channel",
+                "channelHandle": "@unrelated",
+                "subscriberCountText": "1K subscribers",
+            }
+        ]
+
+    def fake_get_channel(*_args, **_kwargs):
+        return [{"publishedTimeText": "2 years ago"}]
+
+    class FakeChannelsSearch:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def result(self):
+            return {
+                "result": [
+                    {
+                        "id": "UCGBS",
+                        "title": "GBS Arbeitsschutz",
+                        "subscribers": "@gbs_arbeitsschutz",
+                        "link": "https://www.youtube.com/@gbs_arbeitsschutz",
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(scrapetube, "get_search", fake_get_search)
+    monkeypatch.setattr(scrapetube, "get_channel", fake_get_channel)
+    monkeypatch.setattr(ChannelsSearch, "__init__", FakeChannelsSearch.__init__)
+    monkeypatch.setattr(ChannelsSearch, "result", FakeChannelsSearch.result)
+
+    result = find_best_youtube_channel(
+        ["gbs-arbeitsschutz"],
+        config=YouTubeSearchConfig(web_validation=False),
+    )
+
+    assert result is not None
+    assert result.handle == "@gbs_arbeitsschutz"
+    assert result.url == "https://www.youtube.com/@gbs_arbeitsschutz"
     assert result.accepted is True
 
 
@@ -204,6 +265,33 @@ def test_find_best_youtube_channel_marks_unvalidated_candidate_low_confidence(
     assert result.url == "https://www.youtube.com/@MrBeast"
 
 
+def test_find_best_youtube_channel_accepts_when_no_api_key_and_no_web_results(
+    monkeypatch,
+) -> None:
+    # Deterministic behavior: local dev machines may have SERPER/YOUTUBE keys set (or loaded from .env).
+    monkeypatch.delenv("SERPER_API_KEY", raising=False)
+    monkeypatch.delenv("YOUTUBE_API_KEY", raising=False)
+
+    def fake_get_search(*_args, **_kwargs):
+        return _fake_search_results()
+
+    def fake_get_channel(*_args, **_kwargs):
+        return _fake_channel_results(12, None)
+
+    monkeypatch.setattr(scrapetube, "get_search", fake_get_search)
+    monkeypatch.setattr(scrapetube, "get_channel", fake_get_channel)
+    monkeypatch.setattr(youtube_adapter, "_search_websearch", lambda *_args, **_kwargs: [])
+
+    result = find_best_youtube_channel(
+        ["MrBeast YouTube"],
+        config=YouTubeSearchConfig(web_validation=True),
+    )
+
+    assert result is not None
+    assert result.accepted is True
+    assert result.url == "https://www.youtube.com/@MrBeast"
+
+
 def test_find_best_youtube_channel_enriches_from_youtube_api_when_key_present(
     monkeypatch,
 ) -> None:
@@ -225,6 +313,12 @@ def test_find_best_youtube_channel_enriches_from_youtube_api_when_key_present(
     class FakeClient:
         def __init__(self, *args, **kwargs):
             pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
 
         def get(self, url: str, params: dict | None = None):
             assert params is not None
@@ -268,6 +362,7 @@ def test_youtube_web_validation_falls_back_to_duckduckgo(monkeypatch) -> None:
         url="https://www.youtube.com/@ExampleChannel",
         subscriber_count=1000,
         channel_id=None,
+        published_at=None,
         source="yt-search-python",
     )
     monkeypatch.setattr(youtube_adapter, "_search_websearch_serper", lambda *_args, **_kwargs: [])
@@ -281,6 +376,7 @@ def test_youtube_web_validation_falls_back_to_duckduckgo(monkeypatch) -> None:
                 url="https://www.youtube.com/@ExampleChannel",
                 subscriber_count=None,
                 channel_id=None,
+                published_at=None,
                 source="websearch-ddg",
             )
         ],
@@ -309,6 +405,7 @@ def test_youtube_domain_fallback_uses_first_web_hit(monkeypatch) -> None:
                 url="https://www.youtube.com/@govkidmethod",
                 subscriber_count=None,
                 channel_id=None,
+                published_at=None,
                 source="websearch",
             )
         ]
@@ -322,4 +419,154 @@ def test_youtube_domain_fallback_uses_first_web_hit(monkeypatch) -> None:
     assert result is not None
     assert result.accepted is True
     assert result.url == "https://www.youtube.com/@govkidmethod"
-    assert result.source == "websearch-domain-first"
+    assert result.source in {"websearch-domain-first", "websearch"}
+
+
+def test_domain_first_fallback_is_not_auto_accepted(monkeypatch) -> None:
+    # Regression guard: domain-first is noisy; it must not be forced accepted when below threshold.
+    monkeypatch.setattr(youtube_adapter, "_hint_candidates_from_queries", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(youtube_adapter, "_search_scrapetube", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(youtube_adapter, "_search_yt_search_python", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(youtube_adapter, "_search_youtube_api", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(youtube_adapter, "_search_websearch", lambda *_args, **_kwargs: [])
+
+    monkeypatch.setattr(
+        youtube_adapter,
+        "_search_domain_first_hit",
+        lambda *_args, **_kwargs: youtube_adapter.YouTubeCandidate(
+            title="Popular Channel",
+            handle="@popular",
+            url="https://www.youtube.com/@popular",
+            subscriber_count=None,
+            channel_id=None,
+            published_at=None,
+            uploads_playlist_id=None,
+            source="websearch-domain-first",
+        ),
+    )
+    monkeypatch.setattr(youtube_adapter, "_validate_with_websearch", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(youtube_adapter, "_enrich_candidate_with_youtube_api", lambda c, *_a, **_k: c)
+
+    result = find_best_youtube_channel(
+        ["example.com youtube"],
+        config=YouTubeSearchConfig(web_validation=False, score_threshold=999),
+    )
+    assert result is not None
+    assert result.url == "https://www.youtube.com/@popular"
+    assert result.accepted is False
+
+
+def test_llm_rerank_picks_better_candidate(monkeypatch) -> None:
+    def fake_get_search(*_args, **_kwargs):
+        return [
+            {
+                "channelId": "UC123",
+                "channelTitle": "Right Channel",
+                "channelHandle": "@right",
+                "subscriberCountText": "100K subscribers",
+            }
+        ]
+
+    class FakeChannelsSearch:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def result(self):
+            return {
+                "result": [
+                    {
+                        "id": "UC999",
+                        "title": "Right Channel",
+                        "subscribers": "@right",
+                        "link": "https://www.youtube.com/@right",
+                    }
+                ]
+            }
+
+    class FakeResponse:
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"decision":"accept","best_index": 0, "confidence": 90, "reason": "Better match."}'
+                        }
+                    }
+                ]
+            }
+
+    def fake_post(self, url, headers=None, json=None):  # type: ignore[no-untyped-def]
+        assert "chat/completions" in url
+        return FakeResponse()
+
+    monkeypatch.setattr(scrapetube, "get_search", fake_get_search)
+    monkeypatch.setattr(ChannelsSearch, "__init__", FakeChannelsSearch.__init__)
+    monkeypatch.setattr(ChannelsSearch, "result", FakeChannelsSearch.result)
+    monkeypatch.setattr(youtube_adapter.httpx.Client, "post", fake_post, raising=False)
+    monkeypatch.setattr(youtube_adapter, "_validate_with_websearch", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(youtube_adapter, "_enrich_candidate_with_youtube_api", lambda c, *_a, **_k: c)
+
+    result = find_best_youtube_channel(
+        ["Right Channel"],
+        config=YouTubeSearchConfig(llm_rerank=True, openai_api_key="fake"),
+    )
+    assert result is not None
+    assert result.url == "https://www.youtube.com/@right"
+
+
+def test_llm_rerank_can_reject_all_candidates(monkeypatch) -> None:
+    def fake_get_search(*_args, **_kwargs):
+        return [
+            {
+                "channelId": "UC123",
+                "channelTitle": "Wrong Channel",
+                "channelHandle": "@wrong",
+                "subscriberCountText": "100K subscribers",
+            }
+        ]
+
+    class FakeChannelsSearch:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def result(self):
+            return {
+                "result": [
+                    {
+                        "id": "UC999",
+                        "title": "Also Wrong",
+                        "subscribers": "@also_wrong",
+                        "link": "https://www.youtube.com/@also_wrong",
+                    }
+                ]
+            }
+
+    class FakeResponse:
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"decision":"reject","best_index": 0, "confidence": 80, "reason": "Unrelated."}'
+                        }
+                    }
+                ]
+            }
+
+    def fake_post(self, url, headers=None, json=None):  # type: ignore[no-untyped-def]
+        assert "chat/completions" in url
+        return FakeResponse()
+
+    monkeypatch.setattr(scrapetube, "get_search", fake_get_search)
+    monkeypatch.setattr(ChannelsSearch, "__init__", FakeChannelsSearch.__init__)
+    monkeypatch.setattr(ChannelsSearch, "result", FakeChannelsSearch.result)
+    monkeypatch.setattr(youtube_adapter.httpx.Client, "post", fake_post, raising=False)
+    monkeypatch.setattr(youtube_adapter, "_validate_with_websearch", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(youtube_adapter, "_enrich_candidate_with_youtube_api", lambda c, *_a, **_k: c)
+
+    result = find_best_youtube_channel(
+        ["Some Lead"],
+        config=YouTubeSearchConfig(llm_rerank=True, openai_api_key="fake", web_validation=False),
+    )
+    assert result is not None
+    assert result.accepted is False
