@@ -814,6 +814,12 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         <div style="margin-top:12px; border-top: 1px dashed var(--line); padding-top: 10px">
           <div style="display:flex; flex-wrap:wrap; align-items:center; gap: 10px">
             <div style="flex:1; min-width: 280px">
+              <div class="k">Qualified Input CSV (defaults to hydrated output)</div>
+              <input id="qualInputPath" class="mono" type="text" value=""
+                placeholder="path-to-hydrated.csv"
+                style="width:100%; padding:7px 10px; border:1px solid var(--line-strong); border-radius:10px" />
+            </div>
+            <div style="flex:1; min-width: 280px">
               <div class="k">Qualified Output CSV</div>
               <input id="qualOutputPath" class="mono" type="text" value="qualified.csv"
                 style="width:100%; padding:7px 10px; border:1px solid var(--line-strong); border-radius:10px" />
@@ -915,6 +921,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         b1?.classList.toggle('active', currentStep === 'enrich');
         b2?.classList.toggle('active', currentStep === 'qualify');
         if (currentStep === 'qualify') {
+          syncQualifyPathsFromHydrated();
           loadQualPrompts();
           fetchQualStatus();
           fetchQualLogs();
@@ -1529,6 +1536,19 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         if (lower.endsWith('.csv')) return s.replace(/\\.csv$/i, '.qualified.csv');
         return s + '.qualified.csv';
       }
+      function syncQualifyPathsFromHydrated() {
+        try {
+          const outEl = document.getElementById('outputPath');
+          const qIn = document.getElementById('qualInputPath');
+          const qOut = document.getElementById('qualOutputPath');
+          if (outEl && qIn && !String(qIn.getAttribute('data-user-edited') || '')) {
+            qIn.value = String(outEl.value || '').trim();
+          }
+          if (outEl && qOut && !String(qOut.getAttribute('data-user-edited') || '')) {
+            qOut.value = suggestQualifiedName(outEl.value);
+          }
+        } catch {}
+      }
       async function fetchQualStatus() {
         const r = await fetch('/qualify/status');
         if (!r.ok) return;
@@ -1549,7 +1569,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         if (el) el.textContent = lines.join('\\n');
       }
       async function startQualify() {
-        const input_path = String(document.getElementById('outputPath')?.value || '').trim();
+        const input_path = String(document.getElementById('qualInputPath')?.value || document.getElementById('outputPath')?.value || '').trim();
         const output_path = String(document.getElementById('qualOutputPath')?.value || '').trim();
         const sort = Boolean(document.getElementById('qualSort')?.checked);
         let llm_model = String(document.getElementById('llmModelSelect')?.value || 'gpt-5-mini').trim();
@@ -1626,18 +1646,15 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
 	      // Default qualified output name based on hydrated output path.
 	      try {
 	        const outEl = document.getElementById('outputPath');
+	        const qIn = document.getElementById('qualInputPath');
 	        const qualEl = document.getElementById('qualOutputPath');
-	        if (outEl && qualEl && !String(qualEl.value || '').trim()) {
-	          qualEl.value = suggestQualifiedName(outEl.value);
-	        }
 	        outEl?.addEventListener('change', () => {
-	          const q = document.getElementById('qualOutputPath');
-	          if (q && !String(q.getAttribute('data-user-edited') || '')) {
-	            q.value = suggestQualifiedName(outEl.value);
-	          }
+	          syncQualifyPathsFromHydrated();
 	        });
+	        qIn?.addEventListener('input', () => { qIn.setAttribute('data-user-edited', '1'); });
 	        qualEl?.addEventListener('input', () => { qualEl.setAttribute('data-user-edited', '1'); });
 	      } catch {}
+	      syncQualifyPathsFromHydrated();
 	      fetchInputPreview(); preloadOutputPreview(); renderLowConfTable(); fetchQualStatus(); tick(); setInterval(tick, 3000);
 	    </script>
 	  </body>
