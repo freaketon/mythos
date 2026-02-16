@@ -29,6 +29,9 @@ RUN_LOG_OUT = "run.full.out.log"
 RUN_LOG_ERR = "run.full.err.log"
 RUN_EVENTS = "run.events.jsonl"
 RUN_STATE = "run.state.json"
+QUAL_STATE = "qualify.state.json"
+QUAL_LOG_OUT = "qualify.out.log"
+QUAL_LOG_ERR = "qualify.err.log"
 QUAL_ICP_PROMPT_FILE = "qualify.icp.txt"
 QUAL_PRODUCT_PROMPT_FILE = "qualify.product.txt"
 
@@ -96,6 +99,14 @@ class QualifyPrompts(BaseModel):
     product_prompt: str = ""
 
 
+class QualifyStartRequest(BaseModel):
+    input_path: str = DEFAULT_OUTPUT
+    output_path: str = "qualified.csv"
+    model: str = "gpt-5-mini"
+    sort: bool = True
+    limit: int | None = Field(default=None, ge=1)
+
+
 @dataclass
 class RunPaths:
     base_dir: Path
@@ -115,6 +126,23 @@ class RunPaths:
     @property
     def events_file(self) -> Path:
         return self.base_dir / RUN_EVENTS
+
+
+@dataclass
+class QualifyPaths:
+    base_dir: Path
+
+    @property
+    def out_log(self) -> Path:
+        return self.base_dir / QUAL_LOG_OUT
+
+    @property
+    def err_log(self) -> Path:
+        return self.base_dir / QUAL_LOG_ERR
+
+    @property
+    def state_file(self) -> Path:
+        return self.base_dir / QUAL_STATE
 
 
 def _count_input_rows(path: Path) -> int:
@@ -401,6 +429,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
     app = FastAPI(title="Contact Enrichment Control")
     base = base_dir or Path.cwd()
     paths = RunPaths(base)
+    qpaths = QualifyPaths(base)
     icp_path = base / QUAL_ICP_PROMPT_FILE
     product_path = base / QUAL_PRODUCT_PROMPT_FILE
 
@@ -675,6 +704,23 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         <button onclick="loadQualPrompts()">Reload prompts</button>
         <button onclick="saveQualPrompts()">Save prompts</button>
         <span class="k">Saved to qualify.icp.txt and qualify.product.txt</span>
+      </div>
+      <div style="margin-top:12px; border-top: 1px dashed var(--line); padding-top: 10px">
+        <div style="display:flex; flex-wrap:wrap; align-items:center; gap: 10px">
+          <div style="flex:1; min-width: 280px">
+            <div class="k">Qualified Output CSV</div>
+            <input id="qualOutputPath" class="mono" type="text" value="qualified.csv"
+              style="width:100%; padding:7px 10px; border:1px solid var(--line-strong); border-radius:10px" />
+          </div>
+          <div style="display:flex; flex-direction:column; gap:6px; min-width: 240px">
+            <label style="user-select:none"><input id="qualSort" type="checkbox" checked /> Sort by fit score</label>
+            <span id="qualState" class="k">Qualification: idle</span>
+          </div>
+        </div>
+        <div style="margin-top:10px">
+          <button onclick="startQualify()">Qualify</button>
+          <button onclick="stopQualify()">Stop Qualify</button>
+        </div>
       </div>
     </div>
     <h3>Insights</h3>
@@ -1369,6 +1415,66 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         }
         setActivity('Saved qualification prompts', false);
       }
+      function suggestQualifiedName(hydratedPath) {
+        const s = String(hydratedPath || '').trim();
+        if (!s) return 'qualified.csv';
+        const lower = s.toLowerCase();
+        if (lower.includes('.hydrated')) {
+          return s.replace(/\\.hydrated[^.]*\\.csv$/i, '.qualified.csv');
+        }
+        if (lower.endsWith('.csv')) return s.replace(/\\.csv$/i, '.qualified.csv');
+        return s + '.qualified.csv';
+      }
+      async function fetchQualStatus() {
+        const r = await fetch('/qualify/status');
+        if (!r.ok) return;
+        const s = await r.json().catch(() => ({}));
+        const el = document.getElementById('qualState');
+        if (el) {
+          const state = String(s.state || 'idle');
+          const rows = (typeof s.rows === 'number') ? s.rows : null;
+          el.textContent = 'Qualification: ' + state + (rows !== null ? (' (rows ' + rows + ')') : '');
+        }
+      }
+      async function startQualify() {
+        const input_path = String(document.getElementById('outputPath')?.value || '').trim();
+        const output_path = String(document.getElementById('qualOutputPath')?.value || '').trim();
+        const sort = Boolean(document.getElementById('qualSort')?.checked);
+        let llm_model = String(document.getElementById('llmModelSelect')?.value || 'gpt-5-mini').trim();
+        if (llm_model === 'custom') {
+          llm_model = String(document.getElementById('llmModelCustom')?.value || '').trim() || 'gpt-5-mini';
+        }
+        const resp = await fetch('/qualify/start', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ input_path, output_path, sort, model: llm_model }),
+        });
+        if (!resp.ok) {
+          const p = await resp.json().catch(() => ({}));
+          setActivity('Qualify failed: ' + String(p.detail || resp.status), false);
+          return;
+        }
+        setActivity('Qualification started...', true);
+        await fetchQualStatus();
+      }
+      async function stopQualify() {
+        const resp = await fetch('/qualify/stop', { method: 'POST' });
+        if (!resp.ok) {
+          setActivity('Stop qualify failed', false);
+          return;
+        }
+        setActivity('Stopping qualification...', false);
+        await fetchQualStatus();
+      }
+      async function fetchQualifiedPreview() {
+        const r = await fetch('/qualify/output-preview?limit=200');
+        if (!r.ok) return;
+        const p = await r.json().catch(() => ({}));
+        const headers = p.headers?.length ? p.headers : ['No qualified output'];
+        const rows = p.rows?.length ? p.rows : [['-']];
+        renderTable('qualTable', headers, rows);
+        wireRowClicks('qualTable');
+      }
       async function stopRun() {
         const response = await fetch('/run/stop', { method: 'POST' });
         if (!response.ok) {
@@ -1380,10 +1486,14 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
       }
       async function tick() {
         await fetchStatus();
+        await fetchQualStatus();
         await fetchEvents();
         const expected = Number(lastStatus?.low_confidence || 0);
         if (currentTab === 'lowconf' || expected > lowConfRows.length || (currentState === 'running' && expected > 0)) {
           await fetchLowConfidence();
+        }
+        if (currentTab === 'qualified') {
+          await fetchQualifiedPreview();
         }
         renderInsights();
         renderInspector();
@@ -1400,7 +1510,22 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
 	        // Reset so picking the same file twice re-triggers change.
 	        try { e.target.value = ''; } catch {}
 	      });
-	      fetchInputPreview(); preloadOutputPreview(); renderLowConfTable(); loadQualPrompts(); tick(); setInterval(tick, 3000);
+	      // Default qualified output name based on hydrated output path.
+	      try {
+	        const outEl = document.getElementById('outputPath');
+	        const qualEl = document.getElementById('qualOutputPath');
+	        if (outEl && qualEl && !String(qualEl.value || '').trim()) {
+	          qualEl.value = suggestQualifiedName(outEl.value);
+	        }
+	        outEl?.addEventListener('change', () => {
+	          const q = document.getElementById('qualOutputPath');
+	          if (q && !String(q.getAttribute('data-user-edited') || '')) {
+	            q.value = suggestQualifiedName(outEl.value);
+	          }
+	        });
+	        qualEl?.addEventListener('input', () => { qualEl.setAttribute('data-user-edited', '1'); });
+	      } catch {}
+	      fetchInputPreview(); preloadOutputPreview(); renderLowConfTable(); loadQualPrompts(); fetchQualStatus(); tick(); setInterval(tick, 3000);
 	    </script>
 	  </body>
 </html>
@@ -1409,6 +1534,10 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
     @app.get("/run/status")
     def run_status() -> dict[str, Any]:
         return _build_status(paths)
+
+    @app.get("/qualify/status")
+    def qualify_status() -> dict[str, Any]:
+        return _build_qual_status(qpaths)
 
     @app.post("/run/start")
     def run_start(payload: RunStartRequest) -> dict[str, Any]:
@@ -1512,6 +1641,115 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         except ProcessLookupError:
             return {"state": "idle", "stopped": False}
         return {"state": "stopping", "stopped": True}
+
+    @app.post("/qualify/start")
+    def qualify_start(payload: QualifyStartRequest) -> dict[str, Any]:
+        state = _read_state(qpaths)  # type: ignore[arg-type]
+        if _is_pid_alive(state.get("pid") if isinstance(state.get("pid"), int) else None):
+            raise HTTPException(status_code=409, detail="A qualification run is already active.")
+        if not icp_path.exists() or not product_path.exists():
+            raise HTTPException(status_code=400, detail="Save ICP and Product prompts before qualifying.")
+        if not icp_path.read_text(encoding="utf-8", errors="ignore").strip():
+            raise HTTPException(status_code=400, detail="ICP prompt is empty.")
+        if not product_path.read_text(encoding="utf-8", errors="ignore").strip():
+            raise HTTPException(status_code=400, detail="Product prompt is empty.")
+
+        try:
+            input_rel = str(_safe_relpath(payload.input_path))
+            output_rel = str(_safe_relpath(payload.output_path))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        out_path = base / output_rel
+        if out_path.exists():
+            try:
+                out_path.unlink()
+            except OSError as exc:
+                raise HTTPException(status_code=409, detail=f"File in use: {out_path.name}.") from exc
+
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        out_log_path = base / f"qualify.{run_id}.out.log"
+        err_log_path = base / f"qualify.{run_id}.err.log"
+
+        cmd = [
+            sys.executable,
+            "-u",
+            "-m",
+            "src.qualify",
+            "--input",
+            input_rel,
+            "--output",
+            output_rel,
+            "--icp",
+            f"@{QUAL_ICP_PROMPT_FILE}",
+            "--product",
+            f"@{QUAL_PRODUCT_PROMPT_FILE}",
+            "--model",
+            payload.model or "gpt-5-mini",
+        ]
+        if payload.limit is not None:
+            cmd.extend(["--limit", str(payload.limit)])
+        if payload.sort:
+            cmd.append("--sort")
+
+        stdout = out_log_path.open("w", encoding="utf-8")
+        stderr = err_log_path.open("w", encoding="utf-8")
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(base),
+                stdout=stdout,
+                stderr=stderr,
+                start_new_session=True,
+                close_fds=True,
+            )
+        finally:
+            stdout.close()
+            stderr.close()
+
+        _write_state(
+            qpaths,  # type: ignore[arg-type]
+            {
+                "pid": proc.pid,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "command": cmd,
+                "out_log_path": out_log_path.name,
+                "err_log_path": err_log_path.name,
+                "input_path": input_rel,
+                "output_path": output_rel,
+            },
+        )
+        return {"state": "running", "pid": proc.pid}
+
+    @app.post("/qualify/stop")
+    def qualify_stop() -> dict[str, Any]:
+        state = _read_state(qpaths)  # type: ignore[arg-type]
+        pid = state.get("pid") if isinstance(state.get("pid"), int) else None
+        if not _is_pid_alive(pid):
+            return {"state": "idle", "stopped": False}
+        state["stop_requested_at"] = datetime.now(timezone.utc).isoformat()
+        _write_state(qpaths, state)  # type: ignore[arg-type]
+        try:
+            if hasattr(os, "killpg"):
+                os.killpg(pid, signal.SIGTERM)
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return {"state": "idle", "stopped": False}
+        return {"state": "stopping", "stopped": True}
+
+    @app.get("/qualify/logs")
+    def qualify_logs(tail: int = 200) -> dict[str, Any]:
+        state = _read_state(qpaths)  # type: ignore[arg-type]
+        err_log_path = _state_path(base, state, "err_log_path", QUAL_LOG_ERR)
+        lines = _tail_lines(err_log_path, limit=max(1, min(tail, 2000)))
+        return {"lines": lines}
+
+    @app.get("/qualify/output-preview")
+    def qualify_output_preview(limit: int = 30) -> dict[str, Any]:
+        state = _read_state(qpaths)  # type: ignore[arg-type]
+        output_path = _state_path(base, state, "output_path", "qualified.csv")
+        return _output_preview(output_path, limit=max(1, min(limit, 200)))
 
     @app.get("/qualify/prompts")
     def qualify_get_prompts() -> dict[str, Any]:

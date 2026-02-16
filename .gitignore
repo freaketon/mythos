@@ -11,6 +11,12 @@ MVI - Elite Outreach List & Tracker - Master List - Elite - Intake - 3009 - 11_1
 run*.log
 run*.jsonl
 run.state.json
+qualify*.log
+qualify.state.json
+qualify.cache.jsonl
+qualify.icp.txt
+qualify.product.txt
+*.qualified.csv
 *.hydrated.full.csv
 *.low-confidence.full.csv
 .coverage
