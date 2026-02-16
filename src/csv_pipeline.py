@@ -20,6 +20,7 @@ from src.tabular_input import count_data_rows, open_input_rows
 LOGGER = logging.getLogger(__name__)
 
 _YOUTUBE_HANDLE_PATTERN = re.compile(r"(?:youtube\.com/@|@)([A-Za-z0-9._-]+)")
+_AT_HANDLE_PATTERN = re.compile(r"@([A-Za-z0-9._-]+)")
 _YOUTUBE_URL_PATTERN = re.compile(
     r"(https?://(?:www\.)?(?:youtube\.com/[^\s]+|youtu\.be/[^\s]+))",
     re.IGNORECASE,
@@ -191,33 +192,53 @@ def _build_youtube_queries(headers: list[str], row: list[str]) -> list[str]:
 
 
 def _extract_youtube_hint(headers: list[str], row: list[str]) -> tuple[str | None, str | None]:
-    values = [value.strip() for value in row if value.strip()]
+    platform_only_handles = {
+        "instagram",
+        "tiktok",
+        "facebook",
+        "linkedin",
+        "twitter",
+        "x",
+    }
+    values: list[tuple[str, str]] = [
+        (headers[index].strip().lower(), value.strip())
+        for index, value in enumerate(row)
+        if value.strip()
+    ]
     values.extend(
         [
-            _first_value(headers, row, "Company URL"),
-            _first_value(headers, row, "Other"),
-            _first_value(
-                headers,
-                row,
-                "What's your Twitter bio? (Describe who you help and how you help them in 3 sentences or less).",
+            ("company url", _first_value(headers, row, "Company URL")),
+            ("other", _first_value(headers, row, "Other")),
+            (
+                "bio",
+                _first_value(
+                    headers,
+                    row,
+                    "What's your Twitter bio? (Describe who you help and how you help them in 3 sentences or less).",
+                ),
             ),
         ]
     )
     handle = None
     channel_url = None
-    for value in values:
+    for header, value in values:
+        if not value:
+            continue
         lower = value.lower()
-        is_candidate = (
-            "youtube.com" in lower
-            or "youtu.be" in lower
-            or value.strip().startswith("@")
-        )
+        is_youtube_field = "youtube" in header
+        has_youtube_signal = "youtube.com" in lower or "youtu.be" in lower or "youtube" in lower
+        starts_with_at = value.strip().startswith("@")
+        is_candidate = has_youtube_signal or (starts_with_at and is_youtube_field)
         if not is_candidate:
             continue
 
         handle_match = _YOUTUBE_HANDLE_PATTERN.search(value)
+        if not handle_match and starts_with_at and is_youtube_field:
+            handle_match = _AT_HANDLE_PATTERN.match(value.strip())
         if handle_match:
-            handle = f"@{handle_match.group(1)}"
+            raw = handle_match.group(1).strip()
+            if raw.lower() not in platform_only_handles:
+                handle = f"@{raw}"
 
         url_match = _YOUTUBE_URL_PATTERN.search(value)
         if url_match:
