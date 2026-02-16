@@ -355,6 +355,37 @@ def _build_status(paths: RunPaths) -> dict[str, Any]:
     }
 
 
+def _build_qual_status(paths: QualifyPaths) -> dict[str, Any]:
+    """
+    Lightweight status for the qualification subprocess.
+
+    Frontend polls this endpoint; keep it resilient (no 500 when idle).
+    """
+    state = _read_state(paths)  # type: ignore[arg-type]
+    pid = state.get("pid")
+    running = _is_pid_alive(pid if isinstance(pid, int) else None)
+    stop_requested = bool(state.get("stop_requested_at"))
+    if running and stop_requested:
+        run_state = "stopping"
+    elif running:
+        run_state = "running"
+    else:
+        run_state = "completed" if state else "idle"
+
+    output_rel = state.get("output_path") if isinstance(state.get("output_path"), str) else ""
+    output_path = paths.base_dir / output_rel if output_rel else (paths.base_dir / "qualified.csv")
+    input_rel = state.get("input_path") if isinstance(state.get("input_path"), str) else ""
+
+    return {
+        "state": run_state,
+        "pid": pid if running else None,
+        "started_at": state.get("started_at"),
+        "input_path": input_rel,
+        "output_path": str(output_path),
+        "rows": _count_rows(output_path),
+    }
+
+
 def _tail_lines(path: Path, limit: int = 200) -> list[str]:
     if not path.exists():
         return []
@@ -585,6 +616,19 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         border-radius: 999px;
       }
       #state { color: var(--muted); margin-left: 6px; }
+      .stepper { display:flex; flex-wrap:wrap; align-items:stretch; gap:10px; margin: 10px 0 14px 0; }
+      .step-btn {
+        display:flex; flex-direction:column; gap:4px;
+        padding:10px 12px; min-width: 220px;
+        border: 1px solid var(--line-strong); border-radius: 12px;
+        background: #fff; cursor:pointer;
+        transition: all 120ms ease;
+      }
+      .step-btn:hover { background: #f2f7ff; border-color: #afc4e4; }
+      .step-btn.active { border-color: #2e6fd6; box-shadow: 0 0 0 3px rgba(46,111,214,0.12); }
+      .step-title { font-weight: 800; color: var(--text); }
+      .step-sub { font-size: 12px; color: var(--muted); line-height: 1.2; }
+      .step-actions { margin-left:auto; display:flex; align-items:center; gap:10px; }
       .run-settings-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top:10px; }
       .run-settings-compact { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
       @media (max-width: 980px) {
@@ -598,6 +642,20 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
   </head>
   <body>
     <h2>Contact Enrichment Control</h2>
+    <div class="stepper">
+      <button id="step-enrich-btn" class="step-btn active" onclick="setStep('enrich')">
+        <span class="step-title">1. Enrich</span>
+        <span class="step-sub">Upload a CSV/XLSX, hydrate socials + metrics, inspect.</span>
+      </button>
+      <button id="step-qualify-btn" class="step-btn" onclick="setStep('qualify')">
+        <span class="step-title">2. Qualify</span>
+        <span class="step-sub">Edit prompts, score fit, draft IG DM, export qualified CSV.</span>
+      </button>
+      <div class="step-actions">
+        <button type="button" onclick="setStep('qualify')">Next: Qualify</button>
+      </div>
+    </div>
+    <div id="step-enrich">
     <div class="status">
       <b>Run Settings</b>
       <div class="run-settings-grid">
@@ -686,43 +744,6 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         <span id="activity">Idle</span>
       </div>
     </div>
-    <div class="status">
-      <b>Qualification Prompts (IG DM)</b>
-      <div class="prompt-grid">
-        <div>
-          <div class="k">ICP Prompt</div>
-          <textarea id="icpPrompt" rows="8"
-            style="width:100%; padding:10px; border:1px solid var(--line); border-radius:12px; resize:vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size: 12px;"></textarea>
-        </div>
-        <div>
-          <div class="k">Product Prompt</div>
-          <textarea id="productPrompt" rows="8"
-            style="width:100%; padding:10px; border:1px solid var(--line); border-radius:12px; resize:vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size: 12px;"></textarea>
-        </div>
-      </div>
-      <div style="margin-top:10px">
-        <button onclick="loadQualPrompts()">Reload prompts</button>
-        <button onclick="saveQualPrompts()">Save prompts</button>
-        <span class="k">Saved to qualify.icp.txt and qualify.product.txt</span>
-      </div>
-      <div style="margin-top:12px; border-top: 1px dashed var(--line); padding-top: 10px">
-        <div style="display:flex; flex-wrap:wrap; align-items:center; gap: 10px">
-          <div style="flex:1; min-width: 280px">
-            <div class="k">Qualified Output CSV</div>
-            <input id="qualOutputPath" class="mono" type="text" value="qualified.csv"
-              style="width:100%; padding:7px 10px; border:1px solid var(--line-strong); border-radius:10px" />
-          </div>
-          <div style="display:flex; flex-direction:column; gap:6px; min-width: 240px">
-            <label style="user-select:none"><input id="qualSort" type="checkbox" checked /> Sort by fit score</label>
-            <span id="qualState" class="k">Qualification: idle</span>
-          </div>
-        </div>
-        <div style="margin-top:10px">
-          <button onclick="startQualify()">Qualify</button>
-          <button onclick="stopQualify()">Stop Qualify</button>
-        </div>
-      </div>
-    </div>
     <h3>Insights</h3>
     <div class="insights">
       <div class="insight-box">
@@ -754,6 +775,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
       <button id="tab-original" class="tab-btn active" onclick="setTab('original')">Original CSV</button>
       <button id="tab-hydrated" class="tab-btn" onclick="setTab('hydrated')">Hydrated CSV</button>
       <button id="tab-lowconf" class="tab-btn" onclick="setTab('lowconf')">Low Confidence</button>
+      <button id="tab-qualified" class="tab-btn" onclick="setTab('qualified')">Qualified CSV</button>
     </div>
     <div id="pane-original" class="tab-pane active">
       <div class="resizable"><div class="scroll"><table id="inputTable"></table></div></div>
@@ -763,6 +785,68 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
     </div>
     <div id="pane-lowconf" class="tab-pane">
       <div class="resizable"><div class="scroll"><table id="lowConfTable"></table></div></div>
+    </div>
+    <div id="pane-qualified" class="tab-pane">
+      <div class="resizable"><div class="scroll"><table id="qualTable"></table></div></div>
+    </div>
+    </div> <!-- /step-enrich -->
+
+    <div id="step-qualify" style="display:none">
+      <div class="status">
+        <b>Qualification (YouTube-first, IG DM)</b>
+        <div class="prompt-grid">
+          <div>
+            <div class="k">ICP Prompt</div>
+            <textarea id="icpPrompt" rows="10"
+              style="width:100%; padding:10px; border:1px solid var(--line); border-radius:12px; resize:vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size: 12px;"></textarea>
+          </div>
+          <div>
+            <div class="k">Product Prompt</div>
+            <textarea id="productPrompt" rows="10"
+              style="width:100%; padding:10px; border:1px solid var(--line); border-radius:12px; resize:vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size: 12px;"></textarea>
+          </div>
+        </div>
+        <div style="margin-top:10px">
+          <button onclick="loadQualPrompts()">Reload prompts</button>
+          <button onclick="saveQualPrompts()">Save prompts</button>
+          <span class="k">Saved to qualify.icp.txt and qualify.product.txt</span>
+        </div>
+        <div style="margin-top:12px; border-top: 1px dashed var(--line); padding-top: 10px">
+          <div style="display:flex; flex-wrap:wrap; align-items:center; gap: 10px">
+            <div style="flex:1; min-width: 280px">
+              <div class="k">Qualified Output CSV</div>
+              <input id="qualOutputPath" class="mono" type="text" value="qualified.csv"
+                style="width:100%; padding:7px 10px; border:1px solid var(--line-strong); border-radius:10px" />
+            </div>
+            <div style="display:flex; flex-direction:column; gap:6px; min-width: 240px">
+              <label style="user-select:none"><input id="qualSort" type="checkbox" checked /> Sort by fit score</label>
+              <span id="qualState" class="k">Qualification: idle</span>
+            </div>
+          </div>
+          <div style="margin-top:10px">
+            <button onclick="startQualify()">Qualify</button>
+            <button onclick="stopQualify()">Stop Qualify</button>
+            <button type="button" onclick="setTab('qualified'); setStep('enrich')">View Qualified CSV</button>
+          </div>
+        </div>
+      </div>
+      <div class="status">
+        <b>Qualification Logs</b>
+        <div class="k" style="margin-bottom:6px">Most recent stderr lines from the qualification run.</div>
+        <div class="resizable" style="height: 240px">
+          <div class="scroll"><pre id="qualLogs" style="margin:0; padding:10px; white-space:pre-wrap; font-size: 12px; color: var(--text)"></pre></div>
+        </div>
+      </div>
+      <div class="status">
+        <b>Qualified Output Preview</b>
+        <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:8px">
+          <span class="k">Uses `qualify/output-preview` and shows the latest qualified CSV.</span>
+          <button type="button" onclick="fetchQualifiedPreview()">Refresh</button>
+        </div>
+        <div class="resizable">
+          <div class="scroll"><table id="qualTableQualify"></table></div>
+        </div>
+      </div>
     </div>
     <script>
       function esc(v) {
@@ -810,10 +894,30 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
       let currentTab = 'original';
       function setTab(tab) {
         currentTab = tab;
-        const tabs = ['original', 'hydrated', 'lowconf'];
+        const tabs = ['original', 'hydrated', 'lowconf', 'qualified'];
         for (const t of tabs) {
           document.getElementById('tab-' + t).classList.toggle('active', tab === t);
           document.getElementById('pane-' + t).classList.toggle('active', tab === t);
+        }
+        if (tab === 'qualified') {
+          fetchQualifiedPreview();
+        }
+      }
+      let currentStep = 'enrich';
+      function setStep(step) {
+        currentStep = String(step || 'enrich');
+        const enrich = document.getElementById('step-enrich');
+        const qualify = document.getElementById('step-qualify');
+        const b1 = document.getElementById('step-enrich-btn');
+        const b2 = document.getElementById('step-qualify-btn');
+        if (enrich) enrich.style.display = (currentStep === 'enrich') ? 'block' : 'none';
+        if (qualify) qualify.style.display = (currentStep === 'qualify') ? 'block' : 'none';
+        b1?.classList.toggle('active', currentStep === 'enrich');
+        b2?.classList.toggle('active', currentStep === 'qualify');
+        if (currentStep === 'qualify') {
+          loadQualPrompts();
+          fetchQualStatus();
+          fetchQualLogs();
         }
       }
       let eventOffset = 0;
@@ -1436,6 +1540,14 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
           el.textContent = 'Qualification: ' + state + (rows !== null ? (' (rows ' + rows + ')') : '');
         }
       }
+      async function fetchQualLogs() {
+        const r = await fetch('/qualify/logs?tail=200');
+        if (!r.ok) return;
+        const p = await r.json().catch(() => ({}));
+        const lines = Array.isArray(p.lines) ? p.lines : [];
+        const el = document.getElementById('qualLogs');
+        if (el) el.textContent = lines.join('\\n');
+      }
       async function startQualify() {
         const input_path = String(document.getElementById('outputPath')?.value || '').trim();
         const output_path = String(document.getElementById('qualOutputPath')?.value || '').trim();
@@ -1456,6 +1568,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         }
         setActivity('Qualification started...', true);
         await fetchQualStatus();
+        await fetchQualLogs();
       }
       async function stopQualify() {
         const resp = await fetch('/qualify/stop', { method: 'POST' });
@@ -1465,6 +1578,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         }
         setActivity('Stopping qualification...', false);
         await fetchQualStatus();
+        await fetchQualLogs();
       }
       async function fetchQualifiedPreview() {
         const r = await fetch('/qualify/output-preview?limit=200');
@@ -1473,7 +1587,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         const headers = p.headers?.length ? p.headers : ['No qualified output'];
         const rows = p.rows?.length ? p.rows : [['-']];
         renderTable('qualTable', headers, rows);
-        wireRowClicks('qualTable');
+        renderTable('qualTableQualify', headers, rows);
       }
       async function stopRun() {
         const response = await fetch('/run/stop', { method: 'POST' });
@@ -1492,9 +1606,8 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         if (currentTab === 'lowconf' || expected > lowConfRows.length || (currentState === 'running' && expected > 0)) {
           await fetchLowConfidence();
         }
-        if (currentTab === 'qualified') {
-          await fetchQualifiedPreview();
-        }
+        if (currentTab === 'qualified') await fetchQualifiedPreview();
+        if (currentStep === 'qualify') await fetchQualLogs();
         renderInsights();
         renderInspector();
       }
@@ -1525,7 +1638,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
 	        });
 	        qualEl?.addEventListener('input', () => { qualEl.setAttribute('data-user-edited', '1'); });
 	      } catch {}
-	      fetchInputPreview(); preloadOutputPreview(); renderLowConfTable(); loadQualPrompts(); fetchQualStatus(); tick(); setInterval(tick, 3000);
+	      fetchInputPreview(); preloadOutputPreview(); renderLowConfTable(); fetchQualStatus(); tick(); setInterval(tick, 3000);
 	    </script>
 	  </body>
 </html>
@@ -1647,6 +1760,8 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         state = _read_state(qpaths)  # type: ignore[arg-type]
         if _is_pid_alive(state.get("pid") if isinstance(state.get("pid"), int) else None):
             raise HTTPException(status_code=409, detail="A qualification run is already active.")
+        if not (os.getenv("OPENAI_API_KEY") or "").strip():
+            raise HTTPException(status_code=400, detail="OPENAI_API_KEY is required to qualify leads.")
         if not icp_path.exists() or not product_path.exists():
             raise HTTPException(status_code=400, detail="Save ICP and Product prompts before qualifying.")
         if not icp_path.read_text(encoding="utf-8", errors="ignore").strip():

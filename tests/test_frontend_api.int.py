@@ -126,6 +126,7 @@ def test_qualify_prompts_roundtrip(tmp_path: Path) -> None:
 
 
 def test_qualify_start_uses_current_python_interpreter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     # Save prompts (required).
     (tmp_path / "qualify.icp.txt").write_text("ICP", encoding="utf-8")
     (tmp_path / "qualify.product.txt").write_text("PRODUCT", encoding="utf-8")
@@ -167,6 +168,41 @@ def test_qualify_start_uses_current_python_interpreter(tmp_path: Path, monkeypat
     assert "--product" in cmd and "@qualify.product.txt" in cmd
     assert "--sort" in cmd
     assert captured["cwd"] == str(tmp_path)
+
+def test_qualify_start_requires_openai_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Prompts exist but env is missing -> 400.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    (tmp_path / "qualify.icp.txt").write_text("ICP", encoding="utf-8")
+    (tmp_path / "qualify.product.txt").write_text("PRODUCT", encoding="utf-8")
+    input_csv = tmp_path / "hydrated.csv"
+    input_csv.write_text("Name,Youtube URL\nAlice,https://www.youtube.com/@alice\n", encoding="utf-8")
+
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+    response = client.post(
+        "/qualify/start",
+        json={
+            "input_path": "hydrated.csv",
+            "output_path": "qualified.csv",
+            "model": "gpt-5-mini",
+            "sort": True,
+            "limit": 1,
+        },
+    )
+    assert response.status_code == 400
+    assert "OPENAI_API_KEY" in response.json()["detail"]
+
+
+def test_qualify_status_reports_idle_when_no_state(tmp_path: Path) -> None:
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    resp = client.get("/qualify/status")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["state"] == "idle"
+    assert payload["pid"] is None
+    assert payload["rows"] == 0
 
 
 def test_input_preview_reads_xlsx(tmp_path: Path) -> None:
