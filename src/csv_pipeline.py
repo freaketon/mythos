@@ -540,26 +540,44 @@ def copy_csv_rows(
                                     LOGGER.info("YouTube HIT row=%s source=%s", line_number, source)
                                 youtube_status = "hit"
                         elif result and not result.accepted:
+                            issue = LowConfidenceIssue(
+                                row_number=line_number,
+                                queries=queries,
+                                candidate_url=result.url or hint_url,
+                                candidate_handle=result.handle or hint_handle,
+                                confidence=result.confidence,
+                                source=(result.confidence_reason or result.source or "rejected"),
+                            )
+                            report.low_confidence_rows.append(issue)
+                            if low_confidence_writer is not None:
+                                low_confidence_writer.writerow(
+                                    [
+                                        issue.row_number,
+                                        " | ".join(issue.queries),
+                                        issue.candidate_url or "",
+                                        issue.candidate_handle or "",
+                                        issue.confidence
+                                        if issue.confidence is not None
+                                        else "",
+                                        issue.source or "",
+                                    ]
+                                )
+                                if low_confidence_file is not None:
+                                    low_confidence_file.flush()
+                            LOGGER.info(
+                                "YouTube NO_HIT row=%s reason=low_confidence_hint_rejected",
+                                line_number,
+                            )
+                            youtube_status = "low_confidence"
+                        else:
                             if hint_handle or hint_url:
-                                youtube_values = [
-                                    hint_handle or result.handle or "",
-                                    hint_url or result.url or "",
-                                    str(result.subscriber_count) if result.subscriber_count is not None else "",
-                                    str(result.upload_count) if result.upload_count is not None else "",
-                                    result.publishing_cadence or "",
-                                    result.channel_age or "",
-                                ]
-                                report.hydrated_youtube_rows += 1
-                                LOGGER.info("YouTube HIT row=%s source=hint", line_number)
-                                youtube_status = "hit_hint"
-                            else:
                                 issue = LowConfidenceIssue(
                                     row_number=line_number,
                                     queries=queries,
-                                    candidate_url=result.url,
-                                    candidate_handle=result.handle,
-                                    confidence=result.confidence,
-                                    source=(result.confidence_reason or result.source),
+                                    candidate_url=hint_url,
+                                    candidate_handle=hint_handle,
+                                    confidence=None,
+                                    source="hint_unverified",
                                 )
                                 report.low_confidence_rows.append(issue)
                                 if low_confidence_writer is not None:
@@ -569,31 +587,14 @@ def copy_csv_rows(
                                             " | ".join(issue.queries),
                                             issue.candidate_url or "",
                                             issue.candidate_handle or "",
-                                            issue.confidence
-                                            if issue.confidence is not None
-                                            else "",
+                                            "",
                                             issue.source or "",
                                         ]
                                     )
                                     if low_confidence_file is not None:
                                         low_confidence_file.flush()
+                                LOGGER.info("YouTube NO_HIT row=%s reason=hint_unverified", line_number)
                                 youtube_status = "low_confidence"
-                        else:
-                            if hint_handle or hint_url:
-                                youtube_values = [
-                                    hint_handle or "",
-                                    hint_url or "",
-                                    "",
-                                    "",
-                                    "",
-                                    "",
-                                ]
-                                report.hydrated_youtube_rows += 1
-                                LOGGER.info(
-                                    "YouTube HIT row=%s source=hint",
-                                    line_number,
-                                )
-                                youtube_status = "hit_hint"
                             else:
                                 report.warning_rows += 1
                                 LOGGER.info("YouTube NO_HIT row=%s", line_number)

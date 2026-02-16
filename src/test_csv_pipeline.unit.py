@@ -97,7 +97,7 @@ def test_copy_csv_rows_populates_youtube_fields(tmp_path: Path) -> None:
     )
 
 
-def test_copy_csv_rows_uses_youtube_hint_when_lookup_fails(tmp_path: Path) -> None:
+def test_copy_csv_rows_does_not_use_youtube_hint_when_lookup_fails(tmp_path: Path) -> None:
     input_csv = tmp_path / "input.csv"
     output_csv = tmp_path / "output.csv"
     input_csv.write_text(
@@ -111,16 +111,18 @@ def test_copy_csv_rows_uses_youtube_hint_when_lookup_fails(tmp_path: Path) -> No
     report = copy_csv_rows(input_csv, output_csv, youtube_lookup=fake_lookup)
 
     assert report.valid_rows == 1
+    assert report.hydrated_youtube_rows == 0
+    assert len(report.low_confidence_rows) == 1
+    assert report.low_confidence_rows[0].source == "hint_unverified"
     assert output_csv.read_text(encoding="utf-8") == (
         "Name,Company URL,Youtube handle,Youtube URL,Youtube Subs count,"
         "Youtube Upload count,Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
         "Instagram followers,Instagram publishing cadence,Instagram Account Age\n"
-        "Mock Client,https://www.youtube.com/@MrBeast,@MrBeast,"
-        "https://www.youtube.com/@MrBeast,,,,,,,,\n"
+        "Mock Client,https://www.youtube.com/@MrBeast,,,,,,,,,,\n"
     )
 
 
-def test_copy_csv_rows_prefers_youtube_hint_when_lookup_is_low_confidence(tmp_path: Path) -> None:
+def test_copy_csv_rows_rejects_youtube_hint_when_lookup_is_low_confidence(tmp_path: Path) -> None:
     input_csv = tmp_path / "input.csv"
     output_csv = tmp_path / "output.csv"
     input_csv.write_text(
@@ -140,14 +142,13 @@ def test_copy_csv_rows_prefers_youtube_hint_when_lookup_is_low_confidence(tmp_pa
     report = copy_csv_rows(input_csv, output_csv, youtube_lookup=fake_lookup)
 
     assert report.valid_rows == 1
-    assert report.hydrated_youtube_rows == 1
-    assert report.low_confidence_rows == []
+    assert report.hydrated_youtube_rows == 0
+    assert len(report.low_confidence_rows) == 1
     assert output_csv.read_text(encoding="utf-8") == (
         "Name,Company URL,Youtube handle,Youtube URL,Youtube Subs count,"
         "Youtube Upload count,Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
         "Instagram followers,Instagram publishing cadence,Instagram Account Age\n"
-        "Mock Client,https://www.youtube.com/@MrBeast,@MrBeast,"
-        "https://www.youtube.com/@MrBeast,,,,,,,,\n"
+        "Mock Client,https://www.youtube.com/@MrBeast,,,,,,,,,,\n"
     )
 
 
@@ -206,7 +207,7 @@ def test_copy_csv_rows_does_not_use_instagram_handle_as_youtube_hint(tmp_path: P
     )
 
 
-def test_copy_csv_rows_uses_explicit_youtube_handle_hint_column(tmp_path: Path) -> None:
+def test_copy_csv_rows_does_not_trust_explicit_youtube_handle_without_validation(tmp_path: Path) -> None:
     input_csv = tmp_path / "input.csv"
     output_csv = tmp_path / "output.csv"
     input_csv.write_text(
@@ -220,12 +221,13 @@ def test_copy_csv_rows_uses_explicit_youtube_handle_hint_column(tmp_path: Path) 
     report = copy_csv_rows(input_csv, output_csv, youtube_lookup=fake_lookup)
 
     assert report.valid_rows == 1
-    assert report.hydrated_youtube_rows == 1
+    assert report.hydrated_youtube_rows == 0
+    assert len(report.low_confidence_rows) == 1
     assert output_csv.read_text(encoding="utf-8") == (
         "Name,Youtube handle,Youtube handle,Youtube URL,Youtube Subs count,"
         "Youtube Upload count,Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
         "Instagram followers,Instagram publishing cadence,Instagram Account Age\n"
-        "Mock Client,@MrBeast,@MrBeast,,,,,,,,,\n"
+        "Mock Client,@MrBeast,,,,,,,,,,\n"
     )
 
 
