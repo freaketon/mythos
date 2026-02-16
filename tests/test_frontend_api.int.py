@@ -205,6 +205,18 @@ def test_qualify_status_reports_idle_when_no_state(tmp_path: Path) -> None:
     assert payload["rows"] == 0
 
 
+def test_qualify_logs_includes_path(tmp_path: Path) -> None:
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    resp = client.get("/qualify/logs?tail=10")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert "path" in payload
+    assert "lines" in payload
+    assert isinstance(payload["lines"], list)
+
+
 def test_input_preview_reads_xlsx(tmp_path: Path) -> None:
     openpyxl = pytest.importorskip("openpyxl")
 

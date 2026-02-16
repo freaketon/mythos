@@ -383,6 +383,7 @@ def _build_qual_status(paths: QualifyPaths) -> dict[str, Any]:
         "input_path": input_rel,
         "output_path": str(output_path),
         "rows": _count_rows(output_path),
+        "has_openai_api_key": bool((os.getenv("OPENAI_API_KEY") or "").strip()),
     }
 
 
@@ -827,6 +828,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
             <div style="display:flex; flex-direction:column; gap:6px; min-width: 240px">
               <label style="user-select:none"><input id="qualSort" type="checkbox" checked /> Sort by fit score</label>
               <span id="qualState" class="k">Qualification: idle</span>
+              <span id="qualEnv" class="k">OPENAI_API_KEY: unknown</span>
             </div>
           </div>
           <div style="margin-top:10px">
@@ -1559,6 +1561,12 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
           const rows = (typeof s.rows === 'number') ? s.rows : null;
           el.textContent = 'Qualification: ' + state + (rows !== null ? (' (rows ' + rows + ')') : '');
         }
+        const envEl = document.getElementById('qualEnv');
+        if (envEl) {
+          const ok = Boolean(s.has_openai_api_key);
+          envEl.textContent = 'OPENAI_API_KEY: ' + (ok ? 'set' : 'missing');
+          envEl.style.color = ok ? 'var(--muted)' : '#b42318';
+        }
       }
       async function fetchQualLogs() {
         const r = await fetch('/qualify/logs?tail=200');
@@ -1566,7 +1574,8 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         const p = await r.json().catch(() => ({}));
         const lines = Array.isArray(p.lines) ? p.lines : [];
         const el = document.getElementById('qualLogs');
-        if (el) el.textContent = lines.join('\\n');
+        const path = String(p.path || '').trim();
+        if (el) el.textContent = (path ? ('# ' + path + '\\n') : '') + lines.join('\\n');
       }
       async function startQualify() {
         const input_path = String(document.getElementById('qualInputPath')?.value || document.getElementById('outputPath')?.value || '').trim();
@@ -1778,7 +1787,10 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         if _is_pid_alive(state.get("pid") if isinstance(state.get("pid"), int) else None):
             raise HTTPException(status_code=409, detail="A qualification run is already active.")
         if not (os.getenv("OPENAI_API_KEY") or "").strip():
-            raise HTTPException(status_code=400, detail="OPENAI_API_KEY is required to qualify leads.")
+            raise HTTPException(
+                status_code=400,
+                detail="OPENAI_API_KEY is required (set it in the same environment that runs the web server, or in .env).",
+            )
         if not icp_path.exists() or not product_path.exists():
             raise HTTPException(status_code=400, detail="Save ICP and Product prompts before qualifying.")
         if not icp_path.read_text(encoding="utf-8", errors="ignore").strip():
@@ -1875,7 +1887,7 @@ def create_app(*, base_dir: Path | None = None) -> FastAPI:
         state = _read_state(qpaths)  # type: ignore[arg-type]
         err_log_path = _state_path(base, state, "err_log_path", QUAL_LOG_ERR)
         lines = _tail_lines(err_log_path, limit=max(1, min(tail, 2000)))
-        return {"lines": lines}
+        return {"path": str(err_log_path), "lines": lines}
 
     @app.get("/qualify/output-preview")
     def qualify_output_preview(limit: int = 30) -> dict[str, Any]:
