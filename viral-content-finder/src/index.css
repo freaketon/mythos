@@ -1,49 +1,74 @@
 @import "tailwindcss";
 
 @theme {
-  /* === Tesoro XP-inspired palette: Green + Purple on deep dark === */
+  /* === Tesoro XP exact palette === */
 
-  /* Primary Green (main accent) */
-  --color-brand-50: #ecfdf5;
-  --color-brand-100: #d1fae5;
-  --color-brand-200: #a7f3d0;
-  --color-brand-300: #6ee7b7;
-  --color-brand-400: #34d399;
-  --color-brand-500: #00E87B;
-  --color-brand-600: #059669;
-  --color-brand-700: #047857;
-  --color-brand-800: #065f46;
-  --color-brand-900: #064e3b;
+  /* Primary Green accent */
+  --color-brand-50: #eaf7ef;
+  --color-brand-100: #c8ebd5;
+  --color-brand-200: #8fd4a9;
+  --color-brand-300: #5aba82;
+  --color-brand-400: #3FA96E;
+  --color-brand-500: #2D6B4A;
+  --color-brand-600: #245a3d;
+  --color-brand-700: #1b4830;
+  --color-brand-800: #123623;
+  --color-brand-900: #0a2416;
 
-  /* Secondary Purple */
+  /* Purple accent */
   --color-accent-300: #d8b4fe;
   --color-accent-400: #c084fc;
   --color-accent-500: #a855f7;
   --color-accent-600: #9333ea;
   --color-accent-700: #7e22ce;
 
-  /* Surface / Background — deep near-black with cool undertone */
-  --color-surface-50: #f0fdf4;
-  --color-surface-100: #e2e8f0;
-  --color-surface-200: #c9d1d9;
-  --color-surface-300: #8b949e;
-  --color-surface-400: #6e7681;
-  --color-surface-700: #1c2333;
-  --color-surface-800: #141b27;
-  --color-surface-900: #0d1117;
-  --color-surface-950: #080b12;
+  /* Surface / Dark backgrounds — warm near-black #0E0E12 */
+  --color-surface-50: #FFF8EE;
+  --color-surface-100: #f5ede0;
+  --color-surface-200: #e8ddd0;
+  --color-surface-300: #9a9494;
+  --color-surface-400: #6b6565;
+  --color-surface-500: #3a3538;
+  --color-surface-700: #1a1a20;
+  --color-surface-800: #131318;
+  --color-surface-900: #0E0E12;
+  --color-surface-950: #0a0a0e;
 
-  /* Status colors */
-  --color-emerald-400: #34d399;
-  --color-emerald-500: #10b981;
-  --color-yellow-400: #facc15;
-  --color-yellow-500: #eab308;
-  --color-red-400: #f87171;
-  --color-red-500: #ef4444;
-  --color-purple-400: #c084fc;
-  --color-purple-500: #a855f7;
+  /* Cream — primary text on dark */
+  --color-cream: #FFF8EE;
+  --color-cream-muted: #c8bfb0;
+
+  /* Beige — light section bg */
+  --color-beige: #F5EDE0;
+
+  /* Pink / Rewards section */
+  --color-pink-100: #F2D5E0;
   --color-pink-400: #f472b6;
   --color-pink-500: #ec4899;
+
+  /* Yellow / Amber — CTA */
+  --color-yellow-400: #F5C542;
+  --color-yellow-500: #FF9F1C;
+
+  /* Red */
+  --color-red-400: #f87171;
+  --color-red-500: #ef4444;
+
+  /* Teal */
+  --color-teal-400: #2dd4bf;
+  --color-teal-500: #14b8a6;
+
+  /* Purple standalone */
+  --color-purple-400: #c084fc;
+  --color-purple-500: #a855f7;
+
+  /* Magenta */
+  --color-magenta-400: #e879f9;
+  --color-magenta-500: #d946ef;
+
+  /* Emerald / Green status */
+  --color-emerald-400: #34d399;
+  --color-emerald-500: #10b981;
 }
 
 * {
@@ -54,12 +79,13 @@
 
 body {
   font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  background-color: var(--color-surface-950);
-  color: #e2e8f0;
+  background-color: var(--color-surface-900);
+  color: var(--color-cream);
   -webkit-font-smoothing: antialiased;
 }
 
-h1, h2, h3, h4, h5, h6 {
+h1, h2, h3, h4, h5, h6,
+button, nav, [data-display] {
   font-family: 'Space Grotesk', 'DM Sans', sans-serif;
 }
 
@@ -74,16 +100,16 @@ h1, h2, h3, h4, h5, h6 {
   border-radius: 3px;
 }
 
-/* Tesoro-style green glow */
+/* === Keyframes === */
+
 @keyframes pulse-glow {
-  0%, 100% { box-shadow: 0 0 12px rgba(0, 232, 123, 0.25), 0 0 40px rgba(0, 232, 123, 0.08); }
-  50% { box-shadow: 0 0 24px rgba(0, 232, 123, 0.45), 0 0 60px rgba(0, 232, 123, 0.15); }
+  0%, 100% { box-shadow: 0 0 12px rgba(63, 169, 110, 0.3), 0 0 40px rgba(63, 169, 110, 0.08); }
+  50% { box-shadow: 0 0 28px rgba(63, 169, 110, 0.5), 0 0 60px rgba(63, 169, 110, 0.15); }
 }
 
-/* Purple glow variant */
 @keyframes pulse-glow-purple {
-  0%, 100% { box-shadow: 0 0 12px rgba(168, 85, 247, 0.25), 0 0 40px rgba(168, 85, 247, 0.08); }
-  50% { box-shadow: 0 0 24px rgba(168, 85, 247, 0.45), 0 0 60px rgba(168, 85, 247, 0.15); }
+  0%, 100% { box-shadow: 0 0 12px rgba(168, 85, 247, 0.3), 0 0 40px rgba(168, 85, 247, 0.08); }
+  50% { box-shadow: 0 0 28px rgba(168, 85, 247, 0.5), 0 0 60px rgba(168, 85, 247, 0.15); }
 }
 
 @keyframes slide-up {
@@ -118,46 +144,108 @@ h1, h2, h3, h4, h5, h6 {
   animation: pulse-glow-purple 2.5s ease-in-out infinite;
 }
 
-/* Gradient text utility */
-.text-gradient-green {
-  background: linear-gradient(135deg, #00E87B, #34d399);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-}
+/* === Colorful text utilities === */
 
+.text-green { color: #3FA96E; }
+.text-purple { color: #a855f7; }
+.text-yellow { color: #F5C542; }
+.text-pink { color: #f472b6; }
+.text-teal { color: #2dd4bf; }
+.text-cream { color: #FFF8EE; }
+.text-cream-muted { color: #c8bfb0; }
+
+/* Gradient text — purple sweep */
 .text-gradient-purple {
-  background: linear-gradient(135deg, #a855f7, #c084fc);
+  background: linear-gradient(135deg, #a855f7, #e879f9);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
 
+/* Gradient text — warm sweep (amber → pink) */
+.text-gradient-warm {
+  background: linear-gradient(135deg, #F5C542, #f472b6);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Gradient text — green sweep */
+.text-gradient-green {
+  background: linear-gradient(135deg, #2D6B4A, #3FA96E);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Gradient text — cream sweep (used for hero titles) */
+.text-gradient-cream {
+  background: linear-gradient(135deg, #FFF8EE, #c8bfb0);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Gradient text — mixed green → purple */
 .text-gradient-mixed {
-  background: linear-gradient(135deg, #00E87B, #a855f7);
+  background: linear-gradient(135deg, #3FA96E, #a855f7);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
 
-/* Glass card effect */
+/* === Glass card — Nav style (dark translucent + blur) === */
 .glass-card {
-  background: rgba(13, 17, 23, 0.6);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(0, 232, 123, 0.08);
+  background: rgba(14, 14, 18, 0.75);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 248, 238, 0.06);
 }
 
-.glass-card-purple {
-  background: rgba(13, 17, 23, 0.6);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(168, 85, 247, 0.08);
+/* === Section backgrounds === */
+
+/* Hero / Nav / Footer / Showcase — Dark #0E0E12 */
+.bg-dark {
+  background-color: #0E0E12;
 }
 
-/* Animated gradient background */
-.bg-gradient-animated {
-  background: linear-gradient(-45deg, #080b12, #0d1117, #0f1a12, #0d1117);
-  background-size: 400% 400%;
-  animation: gradient-shift 15s ease infinite;
+/* Hero purple radial glow */
+.bg-hero-glow {
+  background: radial-gradient(ellipse at 50% 0%, rgba(168, 85, 247, 0.15) 0%, rgba(14, 14, 18, 0) 60%), #0E0E12;
 }
+
+/* How it works — Beige */
+.bg-beige {
+  background-color: #F5EDE0;
+}
+
+/* Card preview — Green gradient */
+.bg-card-green {
+  background: linear-gradient(135deg, #2D6B4A, #3FA96E);
+}
+
+/* Rewards — Pink with lavender blob */
+.bg-rewards-pink {
+  background: radial-gradient(ellipse at 70% 30%, rgba(196, 132, 252, 0.15) 0%, rgba(242, 213, 224, 0) 50%), #F2D5E0;
+}
+
+/* Showcase — Dark with subtle gradients */
+.bg-showcase {
+  background: linear-gradient(180deg, #0E0E12 0%, #131318 50%, #0E0E12 100%);
+}
+
+/* Showcase card — Purple → magenta gradient */
+.bg-showcase-card {
+  background: linear-gradient(135deg, #a855f7, #d946ef);
+}
+
+/* CTA — Yellow/amber gradient */
+.bg-cta-amber {
+  background: linear-gradient(135deg, #F5C542, #FF9F1C);
+}
+
+/* Game card gradient variants */
+.bg-game-amber { background: linear-gradient(135deg, #F5C542, #f59e0b); }
+.bg-game-red { background: linear-gradient(135deg, #ef4444, #dc2626); }
+.bg-game-purple { background: linear-gradient(135deg, #a855f7, #d946ef); }
+.bg-game-teal { background: linear-gradient(135deg, #14b8a6, #2dd4bf); }

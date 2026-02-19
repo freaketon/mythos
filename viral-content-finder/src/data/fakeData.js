@@ -1,14 +1,14 @@
 // Fake data for the Viral Content Finder MVP demo
 
 export const niches = [
-  { id: 'fitness', label: 'Fitness & Wellness', emoji: '💪', color: '#10b981' },
-  { id: 'food', label: 'Food & Cooking', emoji: '🍳', color: '#f97316' },
-  { id: 'fashion', label: 'Fashion & Style', emoji: '👗', color: '#ec4899' },
-  { id: 'tech', label: 'Tech & Gadgets', emoji: '📱', color: '#3b5cff' },
-  { id: 'travel', label: 'Travel & Adventure', emoji: '✈️', color: '#a855f7' },
-  { id: 'business', label: 'Business & Finance', emoji: '💼', color: '#facc15' },
-  { id: 'beauty', label: 'Beauty & Skincare', emoji: '✨', color: '#f472b6' },
-  { id: 'comedy', label: 'Comedy & Entertainment', emoji: '😂', color: '#34d399' },
+  { id: 'fitness', label: 'Fitness & Wellness', emoji: '💪', color: '#3FA96E' },
+  { id: 'food', label: 'Food & Cooking', emoji: '🍳', color: '#F5C542' },
+  { id: 'fashion', label: 'Fashion & Style', emoji: '👗', color: '#f472b6' },
+  { id: 'tech', label: 'Tech & Gadgets', emoji: '📱', color: '#a855f7' },
+  { id: 'travel', label: 'Travel & Adventure', emoji: '✈️', color: '#2dd4bf' },
+  { id: 'business', label: 'Business & Finance', emoji: '💼', color: '#FF9F1C' },
+  { id: 'beauty', label: 'Beauty & Skincare', emoji: '✨', color: '#d946ef' },
+  { id: 'comedy', label: 'Comedy & Entertainment', emoji: '😂', color: '#ef4444' },
 ]
 
 export const competitors = [
