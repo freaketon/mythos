@@ -212,7 +212,7 @@ export function generateOutlierReels(count = 20) {
         textOverlays: randomBetween(0, 8),
         postingHour: randomBetween(6, 23),
       },
-      thumbnailColor: `hsl(${randomBetween(200, 320)}, ${randomBetween(50, 80)}%, ${randomBetween(20, 40)}%)`,
+      thumbnailColor: `hsl(${randomFrom([140, 155, 170, 260, 275, 290, 310])}, ${randomBetween(45, 70)}%, ${randomBetween(15, 30)}%)`,
     })
   }
   return reels.sort((a, b) => b.multiplier - a.multiplier)
