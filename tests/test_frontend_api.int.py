@@ -7,6 +7,7 @@ import sys
 from fastapi.testclient import TestClient
 import pytest
 
+import src.web_app as web_app
 from src.web_app import create_app
 
 
@@ -101,6 +102,193 @@ def test_input_preview_returns_headers_and_rows(tmp_path: Path) -> None:
     assert payload["headers"] == ["A", "B"]
     assert payload["rows"] == [["1", "2"]]
 
+def test_qualify_prompts_roundtrip(tmp_path: Path) -> None:
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    get1 = client.get("/qualify/prompts")
+    assert get1.status_code == 200
+    assert get1.json() == {"icp_prompt": "", "product_prompt": ""}
+
+    set_resp = client.post(
+        "/qualify/prompts",
+        json={"icp_prompt": "ICP here", "product_prompt": "Product here"},
+    )
+    assert set_resp.status_code == 200
+
+    get2 = client.get("/qualify/prompts")
+    assert get2.status_code == 200
+    assert get2.json()["icp_prompt"] == "ICP here"
+    assert get2.json()["product_prompt"] == "Product here"
+
+    assert (tmp_path / "qualify.icp.txt").read_text(encoding="utf-8") == "ICP here"
+    assert (tmp_path / "qualify.product.txt").read_text(encoding="utf-8") == "Product here"
+
+
+def test_qualify_start_uses_current_python_interpreter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    # Save prompts (required).
+    (tmp_path / "qualify.icp.txt").write_text("ICP", encoding="utf-8")
+    (tmp_path / "qualify.product.txt").write_text("PRODUCT", encoding="utf-8")
+    input_csv = tmp_path / "hydrated.csv"
+    input_csv.write_text("Name,Youtube URL\nAlice,https://www.youtube.com/@alice\n", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    class FakeProc:
+        pid = 12345
+
+    def fake_popen(cmd, cwd, stdout, stderr, start_new_session, close_fds):  # type: ignore[no-untyped-def]
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        captured["start_new_session"] = start_new_session
+        captured["close_fds"] = close_fds
+        return FakeProc()
+
+    monkeypatch.setattr("src.web_app.subprocess.Popen", fake_popen)
+
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+    response = client.post(
+        "/qualify/start",
+        json={
+            "input_path": "hydrated.csv",
+            "output_path": "qualified.csv",
+            "model": "gpt-5-mini",
+            "sort": True,
+            "limit": 1,
+        },
+    )
+    assert response.status_code == 200
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    assert cmd[0] == sys.executable
+    assert cmd[1:4] == ["-u", "-m", "src.qualify"]
+    assert "--icp" in cmd and "@qualify.icp.txt" in cmd
+    assert "--product" in cmd and "@qualify.product.txt" in cmd
+    assert "--sort" in cmd
+    assert captured["cwd"] == str(tmp_path)
+
+def test_qualify_start_requires_openai_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Prompts exist but env is missing -> 400.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    (tmp_path / "qualify.icp.txt").write_text("ICP", encoding="utf-8")
+    (tmp_path / "qualify.product.txt").write_text("PRODUCT", encoding="utf-8")
+    input_csv = tmp_path / "hydrated.csv"
+    input_csv.write_text("Name,Youtube URL\nAlice,https://www.youtube.com/@alice\n", encoding="utf-8")
+
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+    response = client.post(
+        "/qualify/start",
+        json={
+            "input_path": "hydrated.csv",
+            "output_path": "qualified.csv",
+            "model": "gpt-5-mini",
+            "sort": True,
+            "limit": 1,
+        },
+    )
+    assert response.status_code == 400
+    assert "OPENAI_API_KEY" in response.json()["detail"]
+
+
+def test_qualify_status_reports_idle_when_no_state(tmp_path: Path) -> None:
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    resp = client.get("/qualify/status")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["state"] == "idle"
+    assert payload["pid"] is None
+    assert payload["rows"] == 0
+
+
+def test_qualify_logs_includes_path(tmp_path: Path) -> None:
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    resp = client.get("/qualify/logs?tail=10")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert "path" in payload
+    assert "lines" in payload
+    assert isinstance(payload["lines"], list)
+
+
+def test_input_preview_reads_xlsx(tmp_path: Path) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+
+    input_xlsx = tmp_path / "sample.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["A", "B"])
+    ws.append([1, 2])
+    ws.append([3, 4])
+    wb.save(input_xlsx)
+    wb.close()
+
+    state = tmp_path / "run.state.json"
+    state.write_text(
+        json.dumps(
+            {
+                "pid": 123,
+                "input_path": "sample.xlsx",
+                "command": ["python", "-m", "src.main", "--input", "sample.xlsx"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/run/input-preview?limit=1")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["headers"] == ["A", "B"]
+    assert payload["rows"] == [["1", "2"]]
+
+
+def test_upload_input_accepts_xlsx_and_updates_state(tmp_path: Path) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["A", "B"])
+    ws.append([1, 2])
+    ws.append([3, 4])
+    from io import BytesIO
+
+    buf = BytesIO()
+    wb.save(buf)
+    wb.close()
+    body = buf.getvalue()
+
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/run/upload-input",
+        content=body,
+        headers={
+            "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "x-filename": "contacts.xlsx",
+        },
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["saved_as"].endswith(".xlsx")
+
+    # State is updated for preview + run defaults.
+    state = json.loads((tmp_path / "run.state.json").read_text(encoding="utf-8"))
+    assert state["input_path"] == payload["saved_as"]
+    assert state["planned_total"] == 2
+
+    preview = client.get("/run/input-preview?limit=10")
+    assert preview.status_code == 200
+    assert preview.json()["headers"] == ["A", "B"]
+
 
 def test_events_endpoint_streams_from_offset(tmp_path: Path) -> None:
     events = tmp_path / "run.events.jsonl"
@@ -135,6 +323,34 @@ def test_output_preview_reads_hydrated_csv(tmp_path: Path) -> None:
     payload = response.json()
     assert payload["headers"] == ["X", "Y"]
     assert payload["rows"] == [["c", "d"]]
+
+
+def test_low_confidence_preview_pages_rows(tmp_path: Path) -> None:
+    low_conf = tmp_path / "low.csv"
+    low_conf.write_text(
+        "row_number,queries,candidate_url,candidate_handle,confidence,source\n"
+        "2,a | b,https://example.com/@a,a,40,ddg\n"
+        "3,c,https://example.com/@c,c,10,serper\n",
+        encoding="utf-8",
+    )
+    state = tmp_path / "run.state.json"
+    state.write_text(json.dumps({"low_confidence_path": "low.csv"}), encoding="utf-8")
+
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    page1 = client.get("/run/low-confidence-preview?offset=0&limit=1")
+    assert page1.status_code == 200
+    payload1 = page1.json()
+    assert payload1["headers"][0] == "row_number"
+    assert payload1["rows"] == [["2", "a | b", "https://example.com/@a", "a", "40", "ddg"]]
+    assert payload1["next_offset"] == 1
+
+    page2 = client.get(f"/run/low-confidence-preview?offset={payload1['next_offset']}&limit=10")
+    assert page2.status_code == 200
+    payload2 = page2.json()
+    assert payload2["rows"] == [["3", "c", "https://example.com/@c", "c", "10", "serper"]]
+    assert payload2["next_offset"] == 2
 
 
 def test_run_start_returns_409_when_artifact_unlink_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -184,6 +400,8 @@ def test_run_start_uses_current_python_interpreter(tmp_path: Path, monkeypatch: 
             "low_confidence_path": "low.csv",
             "checkpoint_every": 1,
             "limit": 1,
+            "llm_rerank": True,
+            "llm_model": "gpt-4o-mini",
         },
     )
 
@@ -192,6 +410,7 @@ def test_run_start_uses_current_python_interpreter(tmp_path: Path, monkeypatch: 
     assert isinstance(cmd, list)
     assert cmd[0] == sys.executable
     assert cmd[1:4] == ["-u", "-m", "src.main"]
+    assert "--llm-rerank" in cmd
     assert captured["start_new_session"] is True
     assert captured["close_fds"] is True
 
@@ -234,3 +453,66 @@ def test_run_start_keeps_web_endpoints_responsive(tmp_path: Path, monkeypatch: p
     # Regression guard: app process remains responsive after starting a run.
     preview_response = client.get("/run/input-preview?limit=5")
     assert preview_response.status_code == 200
+
+
+def test_run_stop_marks_state_stopping_and_signals_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state_file = tmp_path / "run.state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "pid": 42424,
+                "started_at": "2026-02-12T00:00:00+00:00",
+                "command": ["python", "-m", "src.main"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, int] = {}
+
+    def fake_killpg(pid: int, sig: int) -> None:
+        captured["pid"] = pid
+        captured["sig"] = sig
+
+    monkeypatch.setattr("src.web_app._is_pid_alive", lambda pid: bool(pid))
+    monkeypatch.setattr("src.web_app.os.killpg", fake_killpg, raising=False)
+
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    stop_response = client.post("/run/stop")
+    assert stop_response.status_code == 200
+    assert stop_response.json()["state"] == "stopping"
+    assert captured["pid"] == 42424
+
+    status_response = client.get("/run/status")
+    assert status_response.status_code == 200
+    assert status_response.json()["state"] == "stopping"
+
+    persisted_state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert "stop_requested_at" in persisted_state
+
+
+def test_run_stop_returns_idle_when_process_is_not_alive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state_file = tmp_path / "run.state.json"
+    state_file.write_text(json.dumps({"pid": 51515}), encoding="utf-8")
+    monkeypatch.setattr("src.web_app._is_pid_alive", lambda pid: False)
+
+    app = create_app(base_dir=tmp_path)
+    client = TestClient(app)
+
+    response = client.post("/run/stop")
+    assert response.status_code == 200
+    assert response.json() == {"state": "idle", "stopped": False}
+
+
+def test_is_pid_alive_treats_zombie_as_not_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(web_app.os, "kill", lambda *_args, **_kwargs: None)
+
+    class FakeCompletedProcess:
+        returncode = 0
+        stdout = "Z\n"
+
+    monkeypatch.setattr(web_app.subprocess, "run", lambda *_args, **_kwargs: FakeCompletedProcess())
+
+    assert web_app._is_pid_alive(99999) is False
