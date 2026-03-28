@@ -63,6 +63,50 @@ def test_pipeline_mixed_rows_summary(tmp_path: Path) -> None:
     assert "NoMatch" in output_text
 
 
+def test_pipeline_accepts_xlsx_input(tmp_path: Path) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+
+    input_xlsx = tmp_path / "input.xlsx"
+    output_csv = tmp_path / "output.csv"
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Name", "Email", "Company URL"])
+    ws.append(["MrBeast", "mrbeast@example.com", "https://www.youtube.com/@MrBeast"])
+    ws.append(["NoMatch", "nomatch@example.com", "https://example.com"])
+    # Extra, non-empty column beyond the header: should be treated as an invalid row (parity with CSV).
+    ws.append(["TooManyCols", "x@example.com", "https://example.com", "EXTRA"])
+    wb.save(input_xlsx)
+    wb.close()
+
+    def fake_youtube_lookup(queries: list[str]) -> YouTubeChannelData | None:
+        if any("MrBeast" in query for query in queries):
+            return YouTubeChannelData(
+                handle="@MrBeast",
+                url="https://www.youtube.com/@MrBeast",
+                subscriber_count=100_000_000,
+                publishing_cadence="Weekly or more",
+                channel_age="10 years",
+                source_url="https://www.youtube.com/@MrBeast",
+            )
+        return None
+
+    report = copy_csv_rows(
+        input_xlsx,
+        output_csv,
+        youtube_lookup=fake_youtube_lookup,
+    )
+
+    assert report.total_rows == 3
+    assert report.valid_rows == 2
+    assert report.invalid_rows == 1
+    assert report.hydrated_youtube_rows == 1
+
+    output_text = output_csv.read_text(encoding="utf-8")
+    assert "MrBeast" in output_text
+    assert "NoMatch" in output_text
+
+
 def test_checkpoint_persists_partial_progress_on_failure(tmp_path: Path) -> None:
     input_csv = tmp_path / "input.csv"
     output_csv = tmp_path / "output.csv"

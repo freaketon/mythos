@@ -25,10 +25,10 @@ def test_copy_csv_rows_reports_valid_rows(tmp_path: Path) -> None:
     assert report.issues == []
     assert output_csv.read_text(encoding="utf-8") == (
         "Name,Email,Youtube handle,Youtube URL,Youtube Subs count,"
-        "Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
+        "Youtube Upload count,Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
         "Instagram followers,Instagram publishing cadence,Instagram Account Age\n"
-        "Alice,alice@example.com,,,,,,,,,\n"
-        "Bob,bob@example.com,,,,,,,,,\n"
+        "Alice,alice@example.com,,,,,,,,,,\n"
+        "Bob,bob@example.com,,,,,,,,,,\n"
     )
 
 
@@ -48,9 +48,9 @@ def test_copy_csv_rows_skips_invalid_rows_in_non_strict_mode(tmp_path: Path) -> 
     assert len(report.issues) == 1
     assert output_csv.read_text(encoding="utf-8") == (
         "Name,Email,Youtube handle,Youtube URL,Youtube Subs count,"
-        "Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
+        "Youtube Upload count,Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
         "Instagram followers,Instagram publishing cadence,Instagram Account Age\n"
-        "Alice,alice@example.com,,,,,,,,,\n"
+        "Alice,alice@example.com,,,,,,,,,,\n"
     )
 
 
@@ -90,10 +90,10 @@ def test_copy_csv_rows_populates_youtube_fields(tmp_path: Path) -> None:
     assert report.valid_rows == 1
     assert output_csv.read_text(encoding="utf-8") == (
         "Name,Email,Company URL,Youtube handle,Youtube URL,Youtube Subs count,"
-        "Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
+        "Youtube Upload count,Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
         "Instagram followers,Instagram publishing cadence,Instagram Account Age\n"
         "Alice,alice@example.com,https://example.com,@alice,"
-        "https://www.youtube.com/@alice,1200,Weekly or more,2 years,,,,\n"
+        "https://www.youtube.com/@alice,1200,,Weekly or more,2 years,,,,\n"
     )
 
 
@@ -113,10 +113,41 @@ def test_copy_csv_rows_uses_youtube_hint_when_lookup_fails(tmp_path: Path) -> No
     assert report.valid_rows == 1
     assert output_csv.read_text(encoding="utf-8") == (
         "Name,Company URL,Youtube handle,Youtube URL,Youtube Subs count,"
-        "Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
+        "Youtube Upload count,Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
         "Instagram followers,Instagram publishing cadence,Instagram Account Age\n"
         "Mock Client,https://www.youtube.com/@MrBeast,@MrBeast,"
-        "https://www.youtube.com/@MrBeast,,,,,,,\n"
+        "https://www.youtube.com/@MrBeast,,,,,,,,\n"
+    )
+
+
+def test_copy_csv_rows_prefers_youtube_hint_when_lookup_is_low_confidence(tmp_path: Path) -> None:
+    input_csv = tmp_path / "input.csv"
+    output_csv = tmp_path / "output.csv"
+    input_csv.write_text(
+        "Name,Company URL\nMock Client,https://www.youtube.com/@MrBeast\n",
+        encoding="utf-8",
+    )
+
+    def fake_lookup(_: list[str]) -> YouTubeChannelData:
+        return YouTubeChannelData(
+            handle="@wrongchannel",
+            url="https://www.youtube.com/@wrongchannel",
+            confidence=10,
+            source="test",
+            accepted=False,
+        )
+
+    report = copy_csv_rows(input_csv, output_csv, youtube_lookup=fake_lookup)
+
+    assert report.valid_rows == 1
+    assert report.hydrated_youtube_rows == 1
+    assert report.low_confidence_rows == []
+    assert output_csv.read_text(encoding="utf-8") == (
+        "Name,Company URL,Youtube handle,Youtube URL,Youtube Subs count,"
+        "Youtube Upload count,Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
+        "Instagram followers,Instagram publishing cadence,Instagram Account Age\n"
+        "Mock Client,https://www.youtube.com/@MrBeast,@MrBeast,"
+        "https://www.youtube.com/@MrBeast,,,,,,,,\n"
     )
 
 
@@ -145,10 +176,10 @@ def test_copy_csv_rows_resolves_handle_without_hint(tmp_path: Path) -> None:
     assert report.valid_rows == 1
     assert output_csv.read_text(encoding="utf-8") == (
         "Name,Email,Youtube handle,Youtube URL,Youtube Subs count,"
-        "Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
+        "Youtube Upload count,Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
         "Instagram followers,Instagram publishing cadence,Instagram Account Age\n"
         "MrBeast,mrbeast@example.com,@MrBeast,https://www.youtube.com/@MrBeast,"
-        "100000000,Weekly or more,10 years,,,,\n"
+        "100000000,,Weekly or more,10 years,,,,\n"
     )
 
 
@@ -178,9 +209,36 @@ def test_copy_csv_rows_populates_instagram_fields(tmp_path: Path) -> None:
     assert report.valid_rows == 1
     assert output_csv.read_text(encoding="utf-8") == (
         "Name,Email,Youtube handle,Youtube URL,Youtube Subs count,"
-        "Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
+        "Youtube Upload count,Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
         "Instagram followers,Instagram publishing cadence,Instagram Account Age\n"
-        "Mock Client,client@example.com,,,,,,mockclient,1234,Weekly or more,2 years\n"
+        "Mock Client,client@example.com,,,,,,,mockclient,1234,Weekly or more,2 years\n"
+    )
+
+
+def test_copy_csv_rows_uses_instagram_hint_when_lookup_fails(tmp_path: Path) -> None:
+    input_csv = tmp_path / "input.csv"
+    output_csv = tmp_path / "output.csv"
+    input_csv.write_text(
+        "Name,Company URL\nGBS,https://instagram.com/gbs.arbeitsschutz\n",
+        encoding="utf-8",
+    )
+
+    def fake_instagram_lookup(_: str) -> None:
+        return None
+
+    report = copy_csv_rows(
+        input_csv,
+        output_csv,
+        instagram_lookup=fake_instagram_lookup,
+    )
+
+    assert report.valid_rows == 1
+    assert report.hydrated_instagram_rows == 1
+    assert output_csv.read_text(encoding="utf-8") == (
+        "Name,Company URL,Youtube handle,Youtube URL,Youtube Subs count,"
+        "Youtube Upload count,Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
+        "Instagram followers,Instagram publishing cadence,Instagram Account Age\n"
+        "GBS,https://instagram.com/gbs.arbeitsschutz,,,,,,,gbs.arbeitsschutz,,,\n"
     )
 
 
@@ -198,7 +256,7 @@ def test_copy_csv_rows_respects_row_limit(tmp_path: Path) -> None:
     assert report.valid_rows == 1
     assert output_csv.read_text(encoding="utf-8") == (
         "Name,Email,Youtube handle,Youtube URL,Youtube Subs count,"
-        "Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
+        "Youtube Upload count,Youtube Publishing cadence,Youtube Channel Age,Instagram handle,"
         "Instagram followers,Instagram publishing cadence,Instagram Account Age\n"
-        "Alice,alice@example.com,,,,,,,,,\n"
+        "Alice,alice@example.com,,,,,,,,,,\n"
     )

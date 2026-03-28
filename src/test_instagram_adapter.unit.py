@@ -10,6 +10,7 @@ from src.adapters.instagram import (
     _candidate_handles,
     _compute_account_age,
     _compute_cadence,
+    _discover_instagram_handles_from_website,
     _extract_handle_from_instagram_url,
     _search_instagram_handles_web,
     _validate_instagram_candidate,
@@ -22,9 +23,19 @@ def test_candidate_handles_extracts_unique_tokens() -> None:
     assert handles == ["alice.co"]
 
 
+def test_candidate_handles_extracts_keyword_style_handle() -> None:
+    handles = _candidate_handles("instagram handle: gbs.arbeitsschutz")
+    assert handles == ["gbs.arbeitsschutz"]
+
+
 def test_candidate_handles_ignores_generic_tokens() -> None:
     handles = _candidate_handles("Alice Company example.com")
     assert handles == []
+
+
+def test_candidate_handles_does_not_extract_dot_com_from_instagram_domain() -> None:
+    handles = _candidate_handles("Find me at instagram.com https://www.instagram.com/example_handle/")
+    assert handles == ["example_handle"]
 
 
 def test_compute_cadence_from_dates() -> None:
@@ -111,3 +122,62 @@ def test_instagram_web_search_falls_back_to_duckduckgo(monkeypatch) -> None:
     )
     handles = _search_instagram_handles_web("Example Person", InstagramSearchConfig())
     assert handles == {"example_handle"}
+
+
+def test_discover_instagram_handles_from_website_extracts_handle(monkeypatch) -> None:
+    instagram_adapter._WEBSITE_INSTAGRAM_CACHE.clear()
+
+    class FakeResponse:
+        text = '<a href="https://www.instagram.com/example_handle/">IG</a>'
+
+    class FakeClient:
+        def __init__(self, timeout):  # noqa: ANN001
+            self.timeout = timeout
+
+        def __enter__(self):  # noqa: ANN001
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+        def get(self, url, headers=None, follow_redirects=True):  # noqa: ANN001
+            assert "acme.com" in url
+            return FakeResponse()
+
+    monkeypatch.setattr(instagram_adapter.httpx, "Client", FakeClient)
+    config = InstagramSearchConfig(website_discovery_timeout=1.0)
+    handles = _discover_instagram_handles_from_website("https://acme.com", config)
+    assert handles == ["example_handle"]
+
+
+def test_find_instagram_profile_website_discovery_short_circuits_validation(monkeypatch) -> None:
+    class FakeProfile:
+        followers = 100
+
+        @staticmethod
+        def get_posts():  # noqa: ANN001
+            return []
+
+    monkeypatch.setattr(
+        instagram_adapter.instaloader.Profile,
+        "from_username",
+        lambda *_args, **_kwargs: FakeProfile(),
+    )
+    monkeypatch.setattr(
+        instagram_adapter,
+        "_website_discovery_handles",
+        lambda *_args, **_kwargs: ["example_handle"],
+    )
+
+    def fail_if_called(*_args, **_kwargs):  # noqa: ANN001
+        raise AssertionError("web validation should short-circuit for discovered handles")
+
+    monkeypatch.setattr(instagram_adapter, "_search_instagram_handles_web", fail_if_called)
+
+    result = find_instagram_profile(
+        "Acme Inc https://acme.com",
+        config=InstagramSearchConfig(websearch_api_key="fake-key", website_discovery=True),
+        loader=SimpleNamespace(context=object()),
+    )
+    assert result is not None
+    assert result.handle == "example_handle"
